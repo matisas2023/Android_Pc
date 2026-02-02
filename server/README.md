@@ -1,18 +1,10 @@
-# PC Remote Server (FastAPI)
+# PC Remote Server (ASP.NET Core)
 
 Сервер приймає команди з Android-додатку та керує ПК через локальну мережу (Wi‑Fi).
 
 ## Вимоги
 - Windows 10/11
-- Python 3.10-3.13
-
-## Встановлення
-```bash
-cd server
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
+- .NET 8 SDK
 
 ## Налаштування токена
 Сервер читає токен з змінної середовища `PC_REMOTE_API_TOKEN`.
@@ -25,13 +17,12 @@ set PC_REMOTE_API_TOKEN=your-secret-token
 
 ## Запуск
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+cd server
+dotnet run --project Server.csproj --urls http://0.0.0.0:8000
 ```
 
 ## Запуск в один клік (Windows)
 Запустіть файл `server\start_server.cmd`. Він:
-- створить venv;
-- встановить залежності;
 - запустить сервер на `0.0.0.0:8000`.
 
 ## Автовиявлення для Android-додатку
@@ -55,11 +46,13 @@ curl -X POST http://localhost:8000/auth \
 ```json
 {"x": 100, "y": 200, "duration": 0.1, "absolute": true}
 ```
+> Поки що не реалізовано в .NET версії.
 
 ### POST /mouse/click
 ```json
 {"button": "left", "clicks": 1, "interval": 0.0, "x": 100, "y": 200}
 ```
+> Поки що не реалізовано в .NET версії.
 
 ### POST /keyboard/press
 ```json
@@ -69,16 +62,19 @@ curl -X POST http://localhost:8000/auth \
 ```json
 {"keys": ["ctrl", "shift", "esc"]}
 ```
+> Поки що не реалізовано в .NET версії.
 
 ### POST /system/volume
 ```json
 {"action": "up", "steps": 2}
 ```
+> Поки що не реалізовано в .NET версії.
 
 ### POST /system/launch
 ```json
 {"command": "notepad.exe", "args": ["C:\\temp\\notes.txt"]}
 ```
+> Поки що не реалізовано в .NET версії.
 
 ### GET /system/status
 Повертає CPU та RAM статистику.
@@ -112,45 +108,39 @@ curl -X POST http://localhost:8000/auth \
 {"action": "shutdown"}
 ```
 Доступні дії: `shutdown`, `restart`, `lock`, `logoff`, `sleep`, `hibernate`.
+> Поки що не реалізовано в .NET версії.
 
 ### GET /screen/stream
 Онлайн-трансляція екрана (multipart PNG). Параметри: `fps`.
 
 ### GET /camera/stream
 Онлайн-трансляція з камери (MJPEG). Параметри: `fps`, `quality`, `device_index`.
+> Поки що не реалізовано в .NET версії.
 
 ### GET /camera/photo
 Повертає фото з камери (JPEG). Параметр: `device_index`.
-> Для трансляції/фото потрібен додатковий пакет `opencv-python` (опційно, встановлюється вручну).
+> Поки що не реалізовано в .NET версії.
 
 ### POST /screen/record/start
 ```json
 {"fps": 10, "duration_seconds": 30}
 ```
 Старт запису екрана. Повертає `recording_id`.
+> Поки що не реалізовано в .NET версії.
 
 ### POST /screen/record/stop/{recording_id}
 Зупинка запису екрана.
+> Поки що не реалізовано в .NET версії.
 
 ### GET /screen/recordings
 Список активних/завершених записів і файлів у `server/recordings` (формат `.mpng`).
+> Поки що не реалізовано в .NET версії.
 
 ## Примітки
 - Для керування мишею/клавіатурою сервер має працювати у користувацькій сесії (не як сервіс).
 - Додайте сервер у виключення антивіруса/файрвола, якщо потрібно.
 
-## Збірка .exe (PyInstaller)
-> Потрібно лише для одноразової збірки на Windows.
-
+## Збірка .exe
 ```bash
-pip install -r requirements-dev.txt
-```
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
-```
-
-Після збірки файл буде тут:
-```
-server\dist\pc-remote-server.exe
+dotnet publish -c Release -r win-x64 --self-contained false
 ```
