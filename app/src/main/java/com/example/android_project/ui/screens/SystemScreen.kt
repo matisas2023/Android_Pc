@@ -2,6 +2,7 @@ package com.example.android_project.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -260,7 +261,7 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
 @Composable
 private fun SectionCard(
     title: String,
-    content: @Composable Column.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     ElevatedCard {
         Column(
