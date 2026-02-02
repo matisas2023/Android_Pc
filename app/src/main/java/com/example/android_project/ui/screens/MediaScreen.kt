@@ -4,10 +4,13 @@ import android.graphics.BitmapFactory
 import android.webkit.WebView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -29,8 +32,10 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.compose.ui.window.Dialog
 import com.example.android_project.data.SettingsRepository
 import com.example.android_project.network.ApiFactory
 import com.example.android_project.network.ScreenRecordStartRequest
@@ -56,6 +61,7 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
     var recordDuration by remember { mutableStateOf("") }
     var recordingId by remember { mutableStateOf("") }
     var recordingsSummary by remember { mutableStateOf("") }
+    var showFullScreen by remember { mutableStateOf(false) }
 
     Scaffold(
         topBar = {
@@ -120,6 +126,12 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                     }
 
                     if (streamType != StreamType.NONE && baseUrl != null) {
+                        FilledTonalButton(
+                            onClick = { showFullScreen = true },
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("На весь екран")
+                        }
                         val fpsValue = fps.toIntOrNull() ?: 5
                         val qualityValue = quality.toIntOrNull() ?: 80
                         val deviceValue = deviceIndex.toIntOrNull() ?: 0
@@ -128,7 +140,13 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                             StreamType.CAMERA -> "${baseUrl}camera/stream?fps=$fpsValue&quality=$qualityValue&device_index=$deviceValue"
                             StreamType.NONE -> ""
                         }
-                        MjpegStreamView(url = streamUrl, token = token)
+                        MjpegStreamView(
+                            url = streamUrl,
+                            token = token,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .aspectRatio(16f / 9f),
+                        )
                     }
                 }
             }
@@ -306,23 +324,56 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
             }
         }
     }
+
+    if (showFullScreen && streamType != StreamType.NONE && baseUrl != null) {
+        val fpsValue = fps.toIntOrNull() ?: 5
+        val qualityValue = quality.toIntOrNull() ?: 80
+        val deviceValue = deviceIndex.toIntOrNull() ?: 0
+        val streamUrl = when (streamType) {
+            StreamType.SCREEN -> "${baseUrl}screen/stream?fps=$fpsValue"
+            StreamType.CAMERA -> "${baseUrl}camera/stream?fps=$fpsValue&quality=$qualityValue&device_index=$deviceValue"
+            StreamType.NONE -> ""
+        }
+
+        Dialog(onDismissRequest = { showFullScreen = false }) {
+            Box(modifier = Modifier.fillMaxSize()) {
+                MjpegStreamView(
+                    url = streamUrl,
+                    token = token,
+                    modifier = Modifier.fillMaxSize(),
+                )
+                FilledTonalButton(
+                    onClick = { showFullScreen = false },
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(16.dp),
+                ) {
+                    Text("Закрити")
+                }
+            }
+        }
+    }
 }
 
 @Composable
-private fun MjpegStreamView(url: String, token: String) {
+private fun MjpegStreamView(
+    url: String,
+    token: String,
+    modifier: Modifier = Modifier,
+) {
     AndroidView(
         factory = { context ->
             WebView(context).apply {
                 settings.loadWithOverviewMode = true
                 settings.useWideViewPort = true
+                settings.builtInZoomControls = true
+                settings.displayZoomControls = false
             }
         },
         update = { webView ->
             webView.loadUrl(url, mapOf("X-API-Token" to token))
         },
-        modifier = Modifier
-            .fillMaxWidth()
-            .size(240.dp),
+        modifier = modifier,
     )
 }
 

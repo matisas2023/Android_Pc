@@ -29,6 +29,10 @@ data class SystemVolumeRequest(
     val steps: Int = 1,
 )
 
+data class SystemVolumeSetRequest(
+    val level: Int,
+)
+
 data class SystemLaunchRequest(
     val command: String,
     val args: List<String>? = null,
@@ -98,4 +102,57 @@ data class MemoryStats(
     val available: Long,
     val used: Long,
     val percent: Float,
+)
+
+data class HealthResponse(
+    val status: String,
+)
+
+data class SystemMetricsResponse(
+    val uptimeSeconds: Double,
+    val cpuUsagePercent: Double,
+    val gpuUsagePercent: Double?,
+    val memory: MetricsMemoryInfo,
+    val temperatures: MetricsTemperatureInfo?,
+    val battery: MetricsBatteryInfo?,
+    val network: MetricsNetworkInfo,
+    val disks: List<MetricsDiskInfo>,
+    val processes: List<MetricsProcessInfo>,
+)
+
+data class MetricsMemoryInfo(
+    val total: Long,
+    val available: Long,
+    val used: Long,
+    val percent: Double,
+)
+
+data class MetricsTemperatureInfo(
+    val cpuCelsius: Double?,
+    val gpuCelsius: Double?,
+)
+
+data class MetricsBatteryInfo(
+    val isPresent: Boolean,
+    val chargePercent: Int,
+    val isCharging: Boolean,
+    val secondsRemaining: Int?,
+)
+
+data class MetricsNetworkInfo(
+    val downloadBytesPerSec: Double,
+    val uploadBytesPerSec: Double,
+)
+
+data class MetricsDiskInfo(
+    val name: String,
+    val totalBytes: Long,
+    val freeBytes: Long,
+)
+
+data class MetricsProcessInfo(
+    val id: Int,
+    val name: String,
+    val memoryBytes: Long,
+    val cpuSeconds: Double,
 )
