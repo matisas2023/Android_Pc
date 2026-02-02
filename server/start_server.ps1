@@ -14,6 +14,11 @@ if (-not (Test-Path $pythonPath)) {
     & $PythonExe -m venv $venvDir
 }
 
+$pythonExec = $pythonPath
+if (-not (Test-Path $pythonExec)) {
+    $pythonExec = $PythonExe
+}
+
 $requirementsHash = (Get-FileHash -Path $requirementsPath -Algorithm SHA256).Hash
 $needsInstall = $true
 if (Test-Path $requirementsHashPath) {
@@ -24,12 +29,22 @@ if (Test-Path $requirementsHashPath) {
 }
 
 if ($needsInstall) {
-    & $pythonPath -m pip install --disable-pip-version-check --no-input -r $requirementsPath
-    $requirementsHash | Set-Content -Path $requirementsHashPath
+    Push-Location $root
+    try {
+        & $pythonExec -m pip install --disable-pip-version-check --no-input -r $requirementsPath
+        $requirementsHash | Set-Content -Path $requirementsHashPath
+    } finally {
+        Pop-Location
+    }
 }
 
 if (-not $env:PC_REMOTE_API_TOKEN) {
     $env:PC_REMOTE_API_TOKEN = "change-me"
 }
 
-& $pythonPath -m uvicorn main:app --host 0.0.0.0 --port 8000
+Push-Location $root
+try {
+    & $pythonExec -m uvicorn main:app --host 0.0.0.0 --port 8000
+} finally {
+    Pop-Location
+}
