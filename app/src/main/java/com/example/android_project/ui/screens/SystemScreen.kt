@@ -14,9 +14,11 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,11 +29,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.example.android_project.data.SettingsRepository
 import com.example.android_project.network.ApiFactory
+import com.example.android_project.network.SystemMetricsResponse
 import com.example.android_project.network.StatusResponse
 import com.example.android_project.network.SystemLaunchRequest
 import com.example.android_project.network.SystemPowerRequest
-import com.example.android_project.network.SystemVolumeRequest
+import com.example.android_project.network.SystemVolumeSetRequest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -47,6 +52,18 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
     var command by remember { mutableStateOf("notepad.exe") }
     var args by remember { mutableStateOf("") }
     var systemStatus by remember { mutableStateOf<StatusResponse?>(null) }
+    var metrics by remember { mutableStateOf<SystemMetricsResponse?>(null) }
+    var volumeLevel by remember { mutableStateOf(50f) }
+
+    LaunchedEffect(api) {
+        while (isActive) {
+            val response = runCatching { api?.systemMetrics() }.getOrNull()
+            if (response?.isSuccessful == true) {
+                metrics = response.body()
+            }
+            delay(2000)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -68,41 +85,34 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
         ) {
             item {
                 SectionCard(title = "Гучність") {
-                    Row(
-                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    Text(text = "Рівень: ${volumeLevel.toInt()}%")
+                    Slider(
+                        value = volumeLevel,
+                        onValueChange = { volumeLevel = it },
+                        onValueChangeFinished = {
+                            scope.launch {
+                                val apiService = api
+                                if (apiService == null) {
+                                    statusMessage = "Налаштуйте сервер"
+                                    return@launch
+                                }
+                                statusMessage = runCatching {
+                                    apiService.systemVolumeSet(SystemVolumeSetRequest(volumeLevel.toInt()))
+                                }.fold(
+                                    onSuccess = { response ->
+                                        if (response.isSuccessful) {
+                                            "Гучність встановлено"
+                                        } else {
+                                            "Помилка: ${response.code()}"
+                                        }
+                                    },
+                                    onFailure = { error -> "Помилка: ${error.localizedMessage}" },
+                                )
+                            }
+                        },
+                        valueRange = 0f..100f,
                         modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        FilledTonalButton(
-                            onClick = {
-                                scope.launch {
-                                    statusMessage = api?.let { sendVolume(it, "up") } ?: "Налаштуйте сервер"
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("Гучність +")
-                        }
-                        FilledTonalButton(
-                            onClick = {
-                                scope.launch {
-                                    statusMessage = api?.let { sendVolume(it, "down") } ?: "Налаштуйте сервер"
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("Гучність -")
-                        }
-                        FilledTonalButton(
-                            onClick = {
-                                scope.launch {
-                                    statusMessage = api?.let { sendVolume(it, "mute") } ?: "Налаштуйте сервер"
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text("Mute")
-                        }
-                    }
+                    )
                 }
             }
 
@@ -249,6 +259,50 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                 }
             }
 
+            item {
+                SectionCard(title = "Метрики (реальний час)") {
+                    metrics?.let { data ->
+                        Text("Аптайм: ${formatDuration(data.uptimeSeconds)}")
+                        Text("CPU: ${formatPercent(data.cpuUsagePercent)}")
+                        Text("GPU: ${formatPercent(data.gpuUsagePercent)}")
+                        Text(
+                            "RAM: ${formatPercent(data.memory.percent)} " +
+                                "(${formatBytes(data.memory.used)} / ${formatBytes(data.memory.total)})",
+                        )
+                        Text(
+                            "Температура CPU: ${formatTemperature(data.temperatures?.cpuCelsius)}",
+                        )
+                        Text(
+                            "Температура GPU: ${formatTemperature(data.temperatures?.gpuCelsius)}",
+                        )
+                        data.battery?.let { battery ->
+                            Text(
+                                "Батарея: ${battery.chargePercent}% " +
+                                    if (battery.isCharging) "(зарядка)" else "(живлення від батареї)",
+                            )
+                        } ?: Text("Батарея: немає")
+                        Text(
+                            "Мережа: ↓${formatSpeed(data.network.downloadBytesPerSec)} " +
+                                "↑${formatSpeed(data.network.uploadBytesPerSec)}",
+                        )
+                        data.disks.forEach { disk ->
+                            Text(
+                                "Диск ${disk.name}: " +
+                                    "вільно ${formatBytes(disk.freeBytes)} з ${formatBytes(disk.totalBytes)}",
+                            )
+                        }
+                        if (data.processes.isNotEmpty()) {
+                            Text("Активні процеси:")
+                            data.processes.forEach { process ->
+                                Text(
+                                    "• ${process.name} (RAM ${formatBytes(process.memoryBytes)})",
+                                )
+                            }
+                        }
+                    } ?: Text("Немає даних (очікування)")
+                }
+            }
+
             if (statusMessage.isNotEmpty()) {
                 item {
                     Text(text = statusMessage, style = MaterialTheme.typography.bodyMedium)
@@ -274,15 +328,6 @@ private fun SectionCard(
             content()
         }
     }
-}
-
-private suspend fun sendVolume(api: com.example.android_project.network.ApiService, action: String): String {
-    return runCatching {
-        api.systemVolume(SystemVolumeRequest(action = action))
-    }.fold(
-        onSuccess = { if (it.isSuccessful) "Гучність змінено" else "Помилка: ${it.code()}" },
-        onFailure = { "Помилка: ${it.localizedMessage}" },
-    )
 }
 
 private suspend fun sendLaunch(
@@ -325,4 +370,24 @@ private fun formatBytes(value: Long): String {
         value >= kb -> String.format("%.1f KB", value / kb)
         else -> "$value B"
     }
+}
+
+private fun formatPercent(value: Double?): String {
+    return value?.let { String.format("%.1f%%", it) } ?: "n/a"
+}
+
+private fun formatSpeed(bytesPerSec: Double): String {
+    return "${formatBytes(bytesPerSec.toLong())}/с"
+}
+
+private fun formatTemperature(value: Double?): String {
+    return value?.let { String.format("%.1f°C", it) } ?: "n/a"
+}
+
+private fun formatDuration(seconds: Double): String {
+    val totalSeconds = seconds.toLong()
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val secs = totalSeconds % 60
+    return "%02d:%02d:%02d".format(hours, minutes, secs)
 }
