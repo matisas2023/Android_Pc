@@ -9,17 +9,6 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Json;
 
-static class AppConstants
-{
-    public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
-    public const string DefaultApiToken = "change-me";
-    public const int DiscoveryPort = 9999;
-    public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
-    public const int ServerPort = 8000;
-    public const string StreamBoundary = "frame";
-    public const int SessionSweepIntervalSeconds = 30;
-}
-
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<JsonOptions>(options =>
@@ -243,6 +232,17 @@ app.Urls.Clear();
 app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
 
 app.Run();
+
+static class AppConstants
+{
+    public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
+    public const string DefaultApiToken = "change-me";
+    public const int DiscoveryPort = 9999;
+    public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
+    public const int ServerPort = 8000;
+    public const string StreamBoundary = "frame";
+    public const int SessionSweepIntervalSeconds = 30;
+}
 
 record AuthRequest(string Token);
 record MouseMoveRequest(int X, int Y, double Duration = 0, bool Absolute = true);
