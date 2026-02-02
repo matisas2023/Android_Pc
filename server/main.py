@@ -10,6 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
+import cv2
+import numpy as np
 import psutil
 import pyautogui
 from fastapi import FastAPI, HTTPException, Request
