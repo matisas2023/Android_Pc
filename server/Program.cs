@@ -249,13 +249,26 @@ app.MapGet("/screen/recordings", (RecordingStore recordings) =>
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Urls.Clear();
-app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
+var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
+if (!string.IsNullOrWhiteSpace(configuredUrls))
+{
+    foreach (var url in configuredUrls.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        app.Urls.Add(url.Trim());
+    }
+}
+else
+{
+    app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
+    app.Urls.Add($"http://[::]:{AppConstants.ServerPort}");
+}
 
 app.Run();
 
 static class AppConstants
 {
     public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
+    public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
     public const string DefaultApiToken = "change-me";
     public const int DiscoveryPort = 9999;
     public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
