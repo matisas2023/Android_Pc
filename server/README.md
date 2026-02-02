@@ -86,6 +86,54 @@ curl -X POST http://localhost:8000/auth \
 ### GET /screen/screenshot
 Повертає PNG-скріншот екрана.
 
+### POST /session/start
+```json
+{"client_name": "android", "timeout_seconds": 900}
+```
+Повертає `session_id` та час завершення.
+
+### POST /session/heartbeat
+```json
+{"session_id": "<uuid>"}
+```
+Оновлює активність сесії.
+
+### POST /session/end
+```json
+{"session_id": "<uuid>"}
+```
+Завершує сесію.
+
+### GET /session/status/{session_id}
+Повертає актуальний час завершення або 404/410, якщо сесія неактивна.
+
+### POST /system/power
+```json
+{"action": "shutdown"}
+```
+Доступні дії: `shutdown`, `restart`, `lock`, `logoff`, `sleep`, `hibernate`.
+
+### GET /screen/stream
+Онлайн-трансляція екрана (MJPEG). Параметри: `fps`, `quality`.
+
+### GET /camera/stream
+Онлайн-трансляція з камери (MJPEG). Параметри: `fps`, `quality`, `device_index`.
+
+### GET /camera/photo
+Повертає фото з камери (JPEG). Параметр: `device_index`.
+
+### POST /screen/record/start
+```json
+{"fps": 10, "duration_seconds": 30}
+```
+Старт запису екрана. Повертає `recording_id`.
+
+### POST /screen/record/stop/{recording_id}
+Зупинка запису екрана.
+
+### GET /screen/recordings
+Список активних/завершених записів і файлів у `server/recordings`.
+
 ## Примітки
 - Для керування мишею/клавіатурою сервер має працювати у користувацькій сесії (не як сервіс).
 - Додайте сервер у виключення антивіруса/файрвола, якщо потрібно.
