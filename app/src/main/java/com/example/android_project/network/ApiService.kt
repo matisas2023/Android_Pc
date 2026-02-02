@@ -23,6 +23,9 @@ interface ApiService {
     @POST("system/volume")
     suspend fun systemVolume(@Body request: SystemVolumeRequest): Response<Map<String, String>>
 
+    @POST("system/volume/set")
+    suspend fun systemVolumeSet(@Body request: SystemVolumeSetRequest): Response<Map<String, String>>
+
     @POST("system/launch")
     suspend fun systemLaunch(@Body request: SystemLaunchRequest): Response<Map<String, String>>
 
@@ -58,4 +61,7 @@ interface ApiService {
 
     @GET("health")
     suspend fun health(): Response<HealthResponse>
+
+    @GET("system/metrics")
+    suspend fun systemMetrics(): Response<SystemMetricsResponse>
 }

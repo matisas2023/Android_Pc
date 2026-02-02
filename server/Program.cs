@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Management;
 using Microsoft.AspNetCore.Http.Json;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -19,8 +20,10 @@ builder.Services.Configure<JsonOptions>(options =>
 
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<RecordingStore>();
+builder.Services.AddSingleton<MetricsStore>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
+builder.Services.AddHostedService<MetricsSamplingService>();
 
 var app = builder.Build();
 
@@ -131,6 +134,11 @@ app.MapGet("/system/status", () =>
     });
 });
 
+app.MapGet("/system/metrics", (MetricsStore metrics) =>
+{
+    return Results.Ok(metrics.GetSnapshot());
+});
+
 app.MapGet("/screen/screenshot", () =>
 {
     var bytes = ScreenCapture.CapturePng();
@@ -179,6 +187,18 @@ app.MapPost("/system/power", (SystemPowerRequest request) =>
     return ok
         ? Results.Ok(new { status = "ok", action = request.Action })
         : Results.BadRequest(new { detail = "Unsupported action." });
+});
+
+app.MapPost("/system/volume/set", (SystemVolumeSetRequest request) =>
+{
+    if (!OperatingSystem.IsWindows())
+    {
+        return Results.StatusCode(StatusCodes.Status501NotImplemented);
+    }
+
+    var level = Math.Clamp(request.Level, 0, 100);
+    AudioController.SetMasterVolume(level / 100f);
+    return Results.Ok(new { status = "ok", level });
 });
 
 app.MapGet("/screen/stream", async (HttpContext context, int fps = 5) =>
@@ -249,6 +269,7 @@ record MouseMoveRequest(int X, int Y, double Duration = 0, bool Absolute = true)
 record MouseClickRequest(string Button = "left", int Clicks = 1, double Interval = 0, int? X = null, int? Y = null);
 record KeyboardPressRequest(string? Key = null, List<string>? Keys = null, int Presses = 1, double Interval = 0);
 record SystemVolumeRequest(string Action, int Steps = 1);
+record SystemVolumeSetRequest(int Level);
 record SystemLaunchRequest(string Command, List<string>? Args = null);
 record SessionStartRequest(string? ClientName = null, int TimeoutSeconds = 900);
 record SessionHeartbeatRequest(string SessionId);
@@ -841,6 +862,92 @@ static class SystemPower
     }
 }
 
+static class AudioController
+{
+    public static void SetMasterVolume(float level)
+    {
+        var clamped = Math.Clamp(level, 0f, 1f);
+        var enumerator = new MMDeviceEnumerator() as IMMDeviceEnumerator;
+        if (enumerator == null)
+        {
+            return;
+        }
+
+        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out var device));
+        Marshal.ThrowExceptionForHR(device.Activate(ref IAudioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
+        var volume = (IAudioEndpointVolume)volumeObject;
+        Marshal.ThrowExceptionForHR(volume.SetMasterVolumeLevelScalar(clamped, Guid.Empty));
+    }
+
+    private static readonly Guid IAudioEndpointVolumeGuid = typeof(IAudioEndpointVolume).GUID;
+    private const int CLSCTX_ALL = 23;
+
+    private enum EDataFlow
+    {
+        eRender,
+        eCapture,
+        eAll,
+    }
+
+    private enum ERole
+    {
+        eConsole,
+        eMultimedia,
+        eCommunications,
+    }
+
+    [ComImport]
+    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    private class MMDeviceEnumerator
+    {
+    }
+
+    [ComImport]
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDeviceEnumerator
+    {
+        int EnumAudioEndpoints(EDataFlow dataFlow, int dwStateMask, out object ppDevices);
+        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppEndpoint);
+        int GetDevice(string pwstrId, out IMMDevice ppDevice);
+        int RegisterEndpointNotificationCallback(IntPtr pClient);
+        int UnregisterEndpointNotificationCallback(IntPtr pClient);
+    }
+
+    [ComImport]
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IMMDevice
+    {
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, out object ppInterface);
+    }
+
+    [ComImport]
+    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IAudioEndpointVolume
+    {
+        int RegisterControlChangeNotify(IntPtr pNotify);
+        int UnregisterControlChangeNotify(IntPtr pNotify);
+        int GetChannelCount(out int pnChannelCount);
+        int SetMasterVolumeLevel(float fLevelDB, Guid pguidEventContext);
+        int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
+        int GetMasterVolumeLevel(out float pfLevelDB);
+        int GetMasterVolumeLevelScalar(out float pfLevel);
+        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, Guid pguidEventContext);
+        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, Guid pguidEventContext);
+        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
+        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
+        int SetMute(bool bMute, Guid pguidEventContext);
+        int GetMute(out bool pbMute);
+        int GetVolumeStepInfo(out uint pnStep, out uint pnStepCount);
+        int VolumeStepUp(Guid pguidEventContext);
+        int VolumeStepDown(Guid pguidEventContext);
+        int QueryHardwareSupport(out uint pdwHardwareSupportMask);
+        int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
+    }
+}
+
 sealed class RecordingStore
 {
     private readonly ConcurrentDictionary<string, RecordingInfo> _recordings = new();
@@ -946,5 +1053,254 @@ sealed class RecordingStore
         public string File { get; init; } = string.Empty;
         public CancellationTokenSource? StopToken { get; set; }
         public bool Completed { get; set; }
+    }
+}
+
+sealed class MetricsStore
+{
+    private readonly object _lock = new();
+    private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
+    private NetworkSample? _previousNetwork;
+    private readonly PerformanceCounter _cpuCounter = new("Processor", "% Processor Time", "_Total");
+
+    public MetricsSnapshot GetSnapshot()
+    {
+        lock (_lock)
+        {
+            return _snapshot;
+        }
+    }
+
+    public void Sample()
+    {
+        var uptime = TimeSpan.FromMilliseconds(Environment.TickCount64);
+        var cpuUsage = GetCpuUsage();
+        var gpuUsage = GetGpuUsage();
+        var memory = SystemMetrics.GetMemoryStatus();
+        var temperatures = TemperatureReader.GetTemperatures();
+        var battery = BatteryReader.GetBatteryStatus();
+        var network = GetNetworkStats();
+        var disks = DriveInfo.GetDrives()
+            .Where(d => d.IsReady)
+            .Select(d => new DiskInfo(
+                d.Name,
+                d.TotalSize,
+                d.AvailableFreeSpace))
+            .ToList();
+        var processes = Process.GetProcesses()
+            .OrderByDescending(p => p.WorkingSet64)
+            .Take(8)
+            .Select(p =>
+            {
+                var cpuSeconds = 0d;
+                try
+                {
+                    cpuSeconds = p.TotalProcessorTime.TotalSeconds;
+                }
+                catch
+                {
+                    cpuSeconds = 0;
+                }
+                return new ProcessInfo(p.Id, p.ProcessName, p.WorkingSet64, cpuSeconds);
+            })
+            .ToList();
+
+        var snapshot = new MetricsSnapshot(
+            uptime.TotalSeconds,
+            cpuUsage,
+            gpuUsage,
+            new MemoryInfo(memory.Total, memory.Available, memory.Used, memory.Percent),
+            temperatures,
+            battery,
+            network,
+            disks,
+            processes);
+
+        lock (_lock)
+        {
+            _snapshot = snapshot;
+        }
+    }
+
+    private double GetCpuUsage()
+    {
+        try
+        {
+            _ = _cpuCounter.NextValue();
+            Thread.Sleep(100);
+            return Math.Round(_cpuCounter.NextValue(), 2);
+        }
+        catch
+        {
+            return 0;
+        }
+    }
+
+    private double? GetGpuUsage()
+    {
+        try
+        {
+            var category = new PerformanceCounterCategory("GPU Engine");
+            var counters = category.GetInstanceNames()
+                .Where(name => name.Contains("engtype_3D", StringComparison.OrdinalIgnoreCase))
+                .Select(name => new PerformanceCounter("GPU Engine", "Utilization Percentage", name))
+                .ToList();
+
+            if (counters.Count == 0)
+            {
+                return null;
+            }
+
+            double sum = 0;
+            foreach (var counter in counters)
+            {
+                _ = counter.NextValue();
+            }
+            Thread.Sleep(100);
+            foreach (var counter in counters)
+            {
+                sum += counter.NextValue();
+            }
+            return Math.Round(Math.Min(sum, 100), 2);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private NetworkInfo GetNetworkStats()
+    {
+        var now = DateTimeOffset.UtcNow;
+        long received = 0;
+        long sent = 0;
+
+        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
+        {
+            if (nic.OperationalStatus != OperationalStatus.Up)
+            {
+                continue;
+            }
+
+            var stats = nic.GetIPv4Statistics();
+            received += stats.BytesReceived;
+            sent += stats.BytesSent;
+        }
+
+        if (_previousNetwork is null)
+        {
+            _previousNetwork = new NetworkSample(now, received, sent);
+            return new NetworkInfo(0, 0);
+        }
+
+        var duration = Math.Max(1, (now - _previousNetwork.Timestamp).TotalSeconds);
+        var download = (received - _previousNetwork.BytesReceived) / duration;
+        var upload = (sent - _previousNetwork.BytesSent) / duration;
+        _previousNetwork = new NetworkSample(now, received, sent);
+        return new NetworkInfo(Math.Max(0, download), Math.Max(0, upload));
+    }
+
+    private record NetworkSample(DateTimeOffset Timestamp, long BytesReceived, long BytesSent);
+}
+
+sealed class MetricsSamplingService(MetricsStore metrics) : BackgroundService
+{
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            metrics.Sample();
+            try
+            {
+                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                return;
+            }
+        }
+    }
+}
+
+record MetricsSnapshot(
+    double UptimeSeconds,
+    double CpuUsagePercent,
+    double? GpuUsagePercent,
+    MemoryInfo Memory,
+    TemperatureInfo? Temperatures,
+    BatteryInfo? Battery,
+    NetworkInfo Network,
+    List<DiskInfo> Disks,
+    List<ProcessInfo> Processes)
+{
+    public static MetricsSnapshot Empty => new(
+        0,
+        0,
+        null,
+        new MemoryInfo(0, 0, 0, 0),
+        null,
+        null,
+        new NetworkInfo(0, 0),
+        new List<DiskInfo>(),
+        new List<ProcessInfo>());
+}
+
+record MemoryInfo(long Total, long Available, long Used, double Percent);
+
+record TemperatureInfo(double? CpuCelsius, double? GpuCelsius);
+
+record BatteryInfo(bool IsPresent, int ChargePercent, bool IsCharging, int? SecondsRemaining);
+
+record NetworkInfo(double DownloadBytesPerSec, double UploadBytesPerSec);
+
+record DiskInfo(string Name, long TotalBytes, long FreeBytes);
+
+record ProcessInfo(int Id, string Name, long MemoryBytes, double CpuSeconds);
+
+static class TemperatureReader
+{
+    public static TemperatureInfo? GetTemperatures()
+    {
+        try
+        {
+            double? cpuTemp = null;
+            using var searcher = new ManagementObjectSearcher(
+                "root\\WMI",
+                "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
+            foreach (var obj in searcher.Get())
+            {
+                if (obj["CurrentTemperature"] is uint temp)
+                {
+                    cpuTemp = Math.Round((temp / 10.0) - 273.15, 1);
+                    break;
+                }
+            }
+
+            return new TemperatureInfo(cpuTemp, null);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+}
+
+static class BatteryReader
+{
+    public static BatteryInfo? GetBatteryStatus()
+    {
+        try
+        {
+            var status = System.Windows.Forms.SystemInformation.PowerStatus;
+            var present = status.BatteryChargeStatus != System.Windows.Forms.BatteryChargeStatus.NoSystemBattery;
+            var percent = (int)Math.Round(status.BatteryLifePercent * 100);
+            var charging = status.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online;
+            var seconds = status.BatteryLifeRemaining >= 0 ? status.BatteryLifeRemaining : null;
+            return new BatteryInfo(present, percent, charging, seconds);
+        }
+        catch
+        {
+            return null;
+        }
     }
 }
