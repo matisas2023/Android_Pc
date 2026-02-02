@@ -76,5 +76,19 @@ private fun MenuItemCard(title: String, onClick: () -> Unit) {
         ) {
             Text(text = title, style = MaterialTheme.typography.titleMedium)
         }
+
+        Button(
+            onClick = { navController.navigate(Routes.Session.route) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Сесія користувача")
+        }
+
+        Button(
+            onClick = { navController.navigate(Routes.Media.route) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Медіа (стрім/камера/запис)")
+        }
     }
 }
