@@ -22,6 +22,7 @@ import com.example.android_project.data.SettingsRepository
 import com.example.android_project.network.ApiFactory
 import com.example.android_project.network.StatusResponse
 import com.example.android_project.network.SystemLaunchRequest
+import com.example.android_project.network.SystemPowerRequest
 import com.example.android_project.network.SystemVolumeRequest
 import kotlinx.coroutines.launch
 
@@ -73,6 +74,68 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                 },
             ) {
                 Text("Mute")
+            }
+        }
+
+        Text(text = "Живлення", style = MaterialTheme.typography.titleMedium)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "shutdown") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Shutdown")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "restart") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Restart")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "lock") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Lock")
+            }
+        }
+
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "logoff") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Logoff")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "sleep") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Sleep")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        statusMessage = api?.let { sendPower(it, "hibernate") } ?: "Налаштуйте сервер"
+                    }
+                },
+            ) {
+                Text("Hibernate")
             }
         }
 
@@ -162,6 +225,18 @@ private suspend fun sendLaunch(
         api.systemLaunch(SystemLaunchRequest(command = command.trim(), args = argsList))
     }.fold(
         onSuccess = { if (it.isSuccessful) "Запуск виконано" else "Помилка: ${it.code()}" },
+        onFailure = { "Помилка: ${it.localizedMessage}" },
+    )
+}
+
+private suspend fun sendPower(
+    api: com.example.android_project.network.ApiService,
+    action: String,
+): String {
+    return runCatching {
+        api.systemPower(SystemPowerRequest(action = action))
+    }.fold(
+        onSuccess = { if (it.isSuccessful) "Команда виконана" else "Помилка: ${it.code()}" },
         onFailure = { "Помилка: ${it.localizedMessage}" },
     )
 }
