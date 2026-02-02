@@ -4,7 +4,7 @@
 
 ## Вимоги
 - Windows 10/11
-- Python 3.10+
+- Python 3.10-3.13
 
 ## Встановлення
 ```bash
@@ -114,7 +114,7 @@ curl -X POST http://localhost:8000/auth \
 Доступні дії: `shutdown`, `restart`, `lock`, `logoff`, `sleep`, `hibernate`.
 
 ### GET /screen/stream
-Онлайн-трансляція екрана (MJPEG). Параметри: `fps`, `quality`.
+Онлайн-трансляція екрана (multipart PNG). Параметри: `fps`.
 
 ### GET /camera/stream
 Онлайн-трансляція з камери (MJPEG). Параметри: `fps`, `quality`, `device_index`.
@@ -133,7 +133,7 @@ curl -X POST http://localhost:8000/auth \
 Зупинка запису екрана.
 
 ### GET /screen/recordings
-Список активних/завершених записів і файлів у `server/recordings` (формат `.mjpeg`).
+Список активних/завершених записів і файлів у `server/recordings` (формат `.mpng`).
 
 ## Примітки
 - Для керування мишею/клавіатурою сервер має працювати у користувацькій сесії (не як сервіс).
