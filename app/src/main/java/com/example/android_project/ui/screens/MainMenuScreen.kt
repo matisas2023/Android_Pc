@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -16,6 +17,7 @@ import androidx.compose.ui.unit.dp
 import androidx.navigation.NavHostController
 import com.example.android_project.Routes
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainMenuScreen(navController: NavHostController) {
     Scaffold(
@@ -75,20 +77,6 @@ private fun MenuItemCard(title: String, onClick: () -> Unit) {
                 .padding(12.dp),
         ) {
             Text(text = title, style = MaterialTheme.typography.titleMedium)
-        }
-
-        Button(
-            onClick = { navController.navigate(Routes.Session.route) },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Сесія користувача")
-        }
-
-        Button(
-            onClick = { navController.navigate(Routes.Media.route) },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Медіа (стрім/камера/запис)")
         }
     }
 }
