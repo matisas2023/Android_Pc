@@ -34,6 +34,60 @@ data class SystemLaunchRequest(
     val args: List<String>? = null,
 )
 
+data class SessionStartRequest(
+    val client_name: String? = null,
+    val timeout_seconds: Int? = null,
+)
+
+data class SessionHeartbeatRequest(
+    val session_id: String,
+)
+
+data class SessionEndRequest(
+    val session_id: String,
+)
+
+data class SessionStartResponse(
+    val session_id: String,
+    val expires_at: String,
+)
+
+data class SessionStatusResponse(
+    val session_id: String,
+    val expires_at: String,
+)
+
+data class SystemPowerRequest(
+    val action: String,
+)
+
+data class ScreenRecordStartRequest(
+    val fps: Int = 10,
+    val duration_seconds: Int? = null,
+)
+
+data class ScreenRecordStartResponse(
+    val status: String,
+    val recording_id: String,
+)
+
+data class ScreenRecordStopResponse(
+    val status: String,
+    val recording_id: String,
+)
+
+data class RecordingInfo(
+    val started_at: String,
+    val fps: Int,
+    val duration_seconds: Int?,
+    val completed: Boolean,
+    val file: String,
+)
+
+data class ScreenRecordingsResponse(
+    val recordings: Map<String, RecordingInfo>,
+)
+
 data class StatusResponse(
     val cpu_percent: Float,
     val memory: MemoryStats,

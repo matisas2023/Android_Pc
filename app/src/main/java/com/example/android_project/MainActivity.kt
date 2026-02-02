@@ -16,8 +16,10 @@ import com.example.android_project.data.SettingsRepository
 import com.example.android_project.ui.screens.KeyboardScreen
 import com.example.android_project.ui.screens.LoginScreen
 import com.example.android_project.ui.screens.MainMenuScreen
+import com.example.android_project.ui.screens.MediaScreen
 import com.example.android_project.ui.screens.MouseScreen
 import com.example.android_project.ui.screens.ScreenshotScreen
+import com.example.android_project.ui.screens.SessionScreen
 import com.example.android_project.ui.screens.SystemScreen
 import com.example.android_project.ui.theme.Android_projectTheme
 
@@ -64,6 +66,12 @@ private fun AppNavHost(
         composable(Routes.Screenshot.route) {
             ScreenshotScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
         }
+        composable(Routes.Session.route) {
+            SessionScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
+        }
+        composable(Routes.Media.route) {
+            MediaScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
+        }
     }
 }
 
@@ -74,4 +82,6 @@ sealed class Routes(val route: String) {
     data object Keyboard : Routes("keyboard")
     data object System : Routes("system")
     data object Screenshot : Routes("screenshot")
+    data object Session : Routes("session")
+    data object Media : Routes("media")
 }
