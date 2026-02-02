@@ -1,6 +1,9 @@
+import json
 import logging
 import os
+import socket
 import subprocess
+import threading
 from typing import List, Optional
 
 import psutil
@@ -16,6 +19,8 @@ import mss.tools
 
 API_TOKEN_ENV = "PC_REMOTE_API_TOKEN"
 DEFAULT_API_TOKEN = "change-me"
+DISCOVERY_PORT = 9999
+DISCOVERY_MESSAGE = "PC_REMOTE_DISCOVERY"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,6 +29,31 @@ logging.basicConfig(
 logger = logging.getLogger("pc_remote")
 
 app = FastAPI(title="PC Remote Server", version="1.0.0")
+
+
+def start_discovery_listener():
+    def listen():
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            sock.bind(("0.0.0.0", DISCOVERY_PORT))
+            logger.info("Discovery listener started on UDP %s", DISCOVERY_PORT)
+            while True:
+                data, addr = sock.recvfrom(1024)
+                message = data.decode("utf-8", errors="ignore").strip()
+                if message != DISCOVERY_MESSAGE:
+                    continue
+                payload = json.dumps(
+                    {"port": 8000, "token": get_configured_token()},
+                ).encode("utf-8")
+                sock.sendto(payload, addr)
+
+    thread = threading.Thread(target=listen, name="discovery-listener", daemon=True)
+    thread.start()
+
+
+@app.on_event("startup")
+async def startup_event():
+    start_discovery_listener()
 
 
 def get_configured_token() -> str:
