@@ -1,7 +1,6 @@
 package com.example.android_project.data
 
 import android.content.Context
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.preferencesDataStore
@@ -31,7 +30,7 @@ class SettingsRepository(private val context: Context) {
     }
 
     suspend fun saveSettings(serverIp: String, token: String) {
-        context.dataStore.edit { prefs: Preferences ->
+        context.dataStore.edit { prefs ->
             prefs[serverIpKey] = serverIp
             prefs[tokenKey] = token
         }
