@@ -29,7 +29,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Запуск в один клік (Windows)
-Запустіть файл `server\start_server.cmd`. Він:
+Запустіть файл `start_server.cmd` у корені репозиторію або `server\start_server.cmd`. Він:
 - створить venv;
 - встановить залежності;
 - запустить сервер на `0.0.0.0:8000`.
