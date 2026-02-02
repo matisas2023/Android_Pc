@@ -29,7 +29,7 @@ uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ## Запуск в один клік (Windows)
-Запустіть файл `server\start_server.cmd`. Він:
+Запустіть файл `start_server.cmd` у корені репозиторію або `server\start_server.cmd` / `server\start_server` у папці сервера. Він:
 - створить venv;
 - встановить залежності;
 - запустить сервер на `0.0.0.0:8000`.
@@ -149,6 +149,7 @@ pip install -r requirements-dev.txt
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
+Або запустіть файл `server\build_exe` без розширення.
 
 Після збірки файл буде тут:
 ```
