@@ -16,7 +16,6 @@ import psutil
 import pyautogui
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
-from PIL import Image
 from pydantic import BaseModel, Field, validator
 from starlette import status
 
@@ -196,11 +195,6 @@ class SystemPowerRequest(BaseModel):
     )
 
 
-class ScreenStreamRequest(BaseModel):
-    fps: int = Field(5, ge=1, le=30)
-    quality: int = Field(80, ge=30, le=95)
-
-
 class CameraStreamRequest(BaseModel):
     fps: int = Field(5, ge=1, le=30)
     quality: int = Field(80, ge=30, le=95)
@@ -358,31 +352,26 @@ def run_power_action(action: str) -> None:
     subprocess.Popen(command, shell=False)
 
 
-def encode_jpeg_bytes(image: Image.Image, quality: int) -> bytes:
-    if image.mode != "RGB":
-        image = image.convert("RGB")
-    with io.BytesIO() as buffer:
-        image.save(buffer, format="JPEG", quality=quality)
-        return buffer.getvalue()
+def encode_png_bytes(shot: mss.base.ScreenShot) -> bytes:
+    return mss.tools.to_png(shot.rgb, shot.size)
 
 
-def multipart_frame(image: Image.Image, quality: int) -> bytes:
-    buffer = encode_jpeg_bytes(image, quality)
+def multipart_frame(png_bytes: bytes) -> bytes:
     return (
         f"--{STREAM_BOUNDARY}\r\n"
-        "Content-Type: image/jpeg\r\n\r\n"
-    ).encode("utf-8") + buffer + b"\r\n"
+        "Content-Type: image/png\r\n\r\n"
+    ).encode("utf-8") + png_bytes + b"\r\n"
 
 
-def generate_screen_stream(fps: int, quality: int):
+def generate_screen_stream(fps: int):
     interval = 1.0 / fps
     with mss.mss() as sct:
         monitor = sct.monitors[1]
         while True:
             start = time.time()
             shot = sct.grab(monitor)
-            image = Image.frombytes("RGB", shot.size, shot.rgb)
-            yield multipart_frame(image, quality)
+            png_bytes = encode_png_bytes(shot)
+            yield multipart_frame(png_bytes)
             elapsed = time.time() - start
             if elapsed < interval:
                 time.sleep(interval - elapsed)
@@ -407,8 +396,13 @@ def generate_camera_stream(fps: int, quality: int, device_index: int):
             ok, frame = cap.read()
             if not ok:
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Camera frame failed.")
-            image = Image.fromarray(frame[:, :, ::-1])
-            yield multipart_frame(image, quality)
+            success, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
+            if not success:
+                raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to encode image.")
+            yield (
+                f"--{STREAM_BOUNDARY}\r\n"
+                "Content-Type: image/jpeg\r\n\r\n"
+            ).encode("utf-8") + buffer.tobytes() + b"\r\n"
             elapsed = time.time() - start
             if elapsed < interval:
                 time.sleep(interval - elapsed)
@@ -432,8 +426,10 @@ def capture_camera_photo(device_index: int) -> bytes:
         ok, frame = cap.read()
         if not ok:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Camera frame failed.")
-        image = Image.fromarray(frame[:, :, ::-1])
-        return encode_jpeg_bytes(image, 90)
+        success, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 90])
+        if not success:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to encode image.")
+        return buffer.tobytes()
     finally:
         cap.release()
 
@@ -453,14 +449,14 @@ def record_screen_task(
         monitor = sct.monitors[1]
         width = monitor["width"]
         height = monitor["height"]
-        filename = os.path.join(RECORDINGS_DIR, f"screen_{recording_id}.mjpeg")
+        filename = os.path.join(RECORDINGS_DIR, f"screen_{recording_id}.mpng")
         start_time = time.time()
         try:
             with open(filename, "ab") as handle:
                 while not stop_event.is_set():
                     shot = sct.grab(monitor)
-                    image = Image.frombytes("RGB", (width, height), shot.rgb)
-                    frame_bytes = multipart_frame(image, quality=80)
+                    png_bytes = encode_png_bytes(shot)
+                    frame_bytes = multipart_frame(png_bytes)
                     handle.write(frame_bytes)
                     if duration_seconds and time.time() - start_time >= duration_seconds:
                         break
@@ -504,10 +500,10 @@ async def system_power(request: SystemPowerRequest):
 
 
 @app.get("/screen/stream")
-async def screen_stream(fps: int = 5, quality: int = 80):
-    logger.info("Screen stream request fps=%s quality=%s", fps, quality)
+async def screen_stream(fps: int = 5):
+    logger.info("Screen stream request fps=%s", fps)
     return StreamingResponse(
-        generate_screen_stream(fps, quality),
+        generate_screen_stream(fps),
         media_type=f"multipart/x-mixed-replace; boundary={STREAM_BOUNDARY}",
     )
 
@@ -547,7 +543,7 @@ async def screen_record_start(request: ScreenRecordStartRequest):
             "started_at": datetime.now(tz=timezone.utc).isoformat(),
             "duration_seconds": request.duration_seconds,
             "completed": False,
-            "file": os.path.join(RECORDINGS_DIR, f"screen_{recording_id}.mjpeg"),
+            "file": os.path.join(RECORDINGS_DIR, f"screen_{recording_id}.mpng"),
         }
     thread.start()
     return {"status": "ok", "recording_id": recording_id}
