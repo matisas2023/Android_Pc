@@ -55,4 +55,7 @@ interface ApiService {
 
     @GET("screen/recordings")
     suspend fun screenRecordings(): Response<ScreenRecordingsResponse>
+
+    @GET("health")
+    suspend fun health(): Response<HealthResponse>
 }
