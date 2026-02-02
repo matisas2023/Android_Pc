@@ -28,6 +28,11 @@ set PC_REMOTE_API_TOKEN=your-secret-token
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+## Автовиявлення для Android-додатку
+Сервер відповідає на UDP broadcast `PC_REMOTE_DISCOVERY` (порт `9999`) і повертає
+JSON із портом та токеном. Додаток використовує це для автоматичного підключення
+без введення IP/токена.
+
 ## Авторизація
 - Заголовок: `X-API-Token: <token>`
 - Або: `Authorization: Bearer <token>`

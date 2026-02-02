@@ -55,7 +55,7 @@ fun ScreenshotScreen(settingsRepository: SettingsRepository, onBack: () -> Unit)
                     runCatching { api.screenshot() }
                         .onSuccess { response ->
                             if (response.isSuccessful) {
-                                val bytes = response.body()?.bytes().orEmpty()
+                                val bytes = response.body()?.bytes() ?: ByteArray(0)
                                 val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                                 imageBitmap = bitmap?.asImageBitmap()
                                 status = if (bitmap != null) "Готово" else "Не вдалося декодувати"
