@@ -51,5 +51,19 @@ fun MainMenuScreen(navController: NavHostController) {
         ) {
             Text("Скріншот")
         }
+
+        Button(
+            onClick = { navController.navigate(Routes.Session.route) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Сесія користувача")
+        }
+
+        Button(
+            onClick = { navController.navigate(Routes.Media.route) },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Медіа (стрім/камера/запис)")
+        }
     }
 }
