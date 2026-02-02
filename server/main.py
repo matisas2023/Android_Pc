@@ -13,6 +13,7 @@ import psutil
 import pyautogui
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, Field, validator
 from starlette import status
 
@@ -388,7 +389,7 @@ def multipart_frame(frame_bytes: bytes, content_type: str) -> bytes:
     ).encode("utf-8") + frame_bytes + b"\r\n"
 
 
-def generate_screen_stream(fps: int):
+def generate_screen_stream(fps: int, quality: int):
     interval = 1.0 / fps
     with mss.mss() as sct:
         monitor = sct.monitors[1]
@@ -525,10 +526,10 @@ async def system_power(request: SystemPowerRequest):
 
 
 @app.get("/screen/stream")
-async def screen_stream(fps: int = 5):
-    logger.info("Screen stream request fps=%s", fps)
+async def screen_stream(fps: int = 5, quality: int = 80):
+    logger.info("Screen stream request fps=%s quality=%s", fps, quality)
     return StreamingResponse(
-        generate_screen_stream(fps),
+        generate_screen_stream(fps, quality),
         media_type=f"multipart/x-mixed-replace; boundary={STREAM_BOUNDARY}",
     )
 
