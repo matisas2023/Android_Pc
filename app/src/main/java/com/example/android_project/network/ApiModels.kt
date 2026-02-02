@@ -99,3 +99,7 @@ data class MemoryStats(
     val used: Long,
     val percent: Float,
 )
+
+data class HealthResponse(
+    val status: String,
+)
