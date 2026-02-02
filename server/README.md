@@ -121,6 +121,7 @@ curl -X POST http://localhost:8000/auth \
 
 ### GET /camera/photo
 Повертає фото з камери (JPEG). Параметр: `device_index`.
+> Для трансляції/фото потрібен додатковий пакет `opencv-python` (опційно, встановлюється вручну).
 
 ### POST /screen/record/start
 ```json
@@ -132,7 +133,7 @@ curl -X POST http://localhost:8000/auth \
 Зупинка запису екрана.
 
 ### GET /screen/recordings
-Список активних/завершених записів і файлів у `server/recordings`.
+Список активних/завершених записів і файлів у `server/recordings` (формат `.mjpeg`).
 
 ## Примітки
 - Для керування мишею/клавіатурою сервер має працювати у користувацькій сесії (не як сервіс).
