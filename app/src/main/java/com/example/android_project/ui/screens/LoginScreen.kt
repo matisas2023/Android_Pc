@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -66,6 +67,51 @@ fun LoginScreen(
             text = "Підключення відбувається автоматично, без введення IP та token.",
             style = MaterialTheme.typography.bodyMedium,
         )
+
+        OutlinedTextField(
+            value = serverIp,
+            onValueChange = { serverIp = it },
+            label = { Text("Адреса сервера (IP:port)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        OutlinedTextField(
+            value = token,
+            onValueChange = { token = it },
+            label = { Text("Token (якщо потрібно)") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Button(
+            onClick = {
+                scope.launch {
+                    val baseUrl = normalizeBaseUrl(serverIp)
+                    if (baseUrl == null) {
+                        statusMessage = "Не вдалося сформувати адресу"
+                        return@launch
+                    }
+                    statusMessage = "Перевірка..."
+                    val effectiveToken = token.ifBlank { "change-me" }
+                    runCatching {
+                        val api = ApiFactory.create(baseUrl, effectiveToken)
+                        api.auth(AuthRequest(effectiveToken))
+                    }.onSuccess { response ->
+                        statusMessage = if (response.isSuccessful) {
+                            settingsRepository.saveSettings(serverIp, effectiveToken)
+                            onContinue()
+                            "Підключення успішне"
+                        } else {
+                            "Помилка: ${response.code()}"
+                        }
+                    }.onFailure { error ->
+                        statusMessage = "Помилка: ${error.localizedMessage}"
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Підключитися вручну")
+        }
 
         Button(
             onClick = {
