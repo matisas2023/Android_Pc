@@ -26,6 +26,7 @@ API_TOKEN_ENV = "PC_REMOTE_API_TOKEN"
 DEFAULT_API_TOKEN = "change-me"
 DISCOVERY_PORT = 9999
 DISCOVERY_MESSAGE = "PC_REMOTE_DISCOVERY"
+DISCOVERY_RESPONSE_PORT = 8000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -57,7 +58,11 @@ def start_discovery_listener():
                 if message != DISCOVERY_MESSAGE:
                     continue
                 payload = json.dumps(
-                    {"port": 8000, "token": get_configured_token()},
+                    {
+                        "port": DISCOVERY_RESPONSE_PORT,
+                        "token": get_configured_token(),
+                        "ips": get_host_ips(),
+                    },
                 ).encode("utf-8")
                 sock.sendto(payload, addr)
 
@@ -91,6 +96,29 @@ async def startup_event():
 def get_configured_token() -> str:
     return os.getenv(API_TOKEN_ENV, DEFAULT_API_TOKEN)
 
+
+def get_host_ips() -> List[str]:
+    ips: List[str] = []
+    try:
+        hostname = socket.gethostname()
+        candidates = socket.getaddrinfo(hostname, None, family=socket.AF_INET)
+        for candidate in candidates:
+            ip = candidate[4][0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except socket.gaierror:
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except OSError:
+        pass
+
+    return ips or ["127.0.0.1"]
 
 def extract_token(request: Request) -> Optional[str]:
     auth_header = request.headers.get("Authorization")
