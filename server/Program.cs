@@ -248,7 +248,7 @@ record MouseClickRequest(string Button = "left", int Clicks = 1, double Interval
 record KeyboardPressRequest(string? Key = null, List<string>? Keys = null, int Presses = 1, double Interval = 0);
 record SystemVolumeRequest(string Action, int Steps = 1);
 record SystemLaunchRequest(string Command, List<string>? Args = null);
-record SessionStartRequest(string? ClientName = null, int TimeoutSeconds = DefaultSessionTimeoutSeconds);
+record SessionStartRequest(string? ClientName = null, int TimeoutSeconds = 900);
 record SessionHeartbeatRequest(string SessionId);
 record SessionEndRequest(string SessionId);
 record SystemPowerRequest(string Action);
