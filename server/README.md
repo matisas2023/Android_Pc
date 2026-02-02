@@ -78,3 +78,19 @@ curl -X POST http://localhost:8000/auth \
 ## Примітки
 - Для керування мишею/клавіатурою сервер має працювати у користувацькій сесії (не як сервіс).
 - Додайте сервер у виключення антивіруса/файрвола, якщо потрібно.
+
+## Збірка .exe (PyInstaller)
+> Потрібно лише для одноразової збірки на Windows.
+
+```bash
+pip install -r requirements-dev.txt
+```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
+
+Після збірки файл буде тут:
+```
+server\dist\pc-remote-server.exe
+```
