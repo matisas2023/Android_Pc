@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -23,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import com.example.android_project.data.SettingsRepository
 import com.example.android_project.network.ApiFactory
 import com.example.android_project.network.AuthRequest
+import com.example.android_project.network.ServerDiscovery
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
@@ -39,6 +39,19 @@ fun LoginScreen(
     LaunchedEffect(Unit) {
         serverIp = settingsRepository.serverIpFlow.first()
         token = settingsRepository.tokenFlow.first()
+        if (serverIp.isBlank()) {
+            statusMessage = "Пошук сервера..."
+            val discovered = ServerDiscovery.discover()
+            if (discovered != null) {
+                serverIp = "${discovered.host}:${discovered.port}"
+                token = discovered.token.orEmpty().ifBlank { "change-me" }
+                settingsRepository.saveSettings(serverIp, token)
+                statusMessage = "Підключення знайдено"
+                onContinue()
+            } else {
+                statusMessage = "Сервер не знайдено"
+            }
+        }
     }
 
     Column(
@@ -49,46 +62,37 @@ fun LoginScreen(
     ) {
         Text(text = "Підключення", style = MaterialTheme.typography.headlineMedium)
 
-        OutlinedTextField(
-            value = serverIp,
-            onValueChange = { serverIp = it },
-            label = { Text("IP або URL сервера (наприклад, 192.168.0.10:8000)") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        OutlinedTextField(
-            value = token,
-            onValueChange = { token = it },
-            label = { Text("API token") },
-            modifier = Modifier.fillMaxWidth(),
+        Text(
+            text = "Підключення відбувається автоматично, без введення IP та token.",
+            style = MaterialTheme.typography.bodyMedium,
         )
 
         Button(
             onClick = {
                 scope.launch {
-                    settingsRepository.saveSettings(serverIp.trim(), token.trim())
-                    onContinue()
-                }
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Зберегти і продовжити")
-        }
-
-        Button(
-            onClick = {
-                scope.launch {
-                    statusMessage = "Перевірка..."
-                    val baseUrl = normalizeBaseUrl(serverIp)
-                    if (baseUrl == null || token.isBlank()) {
-                        statusMessage = "Заповніть IP та token"
+                    statusMessage = "Пошук сервера..."
+                    val discovered = ServerDiscovery.discover()
+                    if (discovered == null) {
+                        statusMessage = "Сервер не знайдено"
                         return@launch
                     }
+                    serverIp = "${discovered.host}:${discovered.port}"
+                    token = discovered.token.orEmpty()
+                    settingsRepository.saveSettings(serverIp, token)
+                    statusMessage = "Перевірка..."
+                    val baseUrl = normalizeBaseUrl(serverIp)
+                    if (baseUrl == null) {
+                        statusMessage = "Не вдалося сформувати адресу"
+                        return@launch
+                    }
+                    val effectiveToken = token.ifBlank { "change-me" }
                     runCatching {
-                        val api = ApiFactory.create(baseUrl, token)
-                        api.auth(AuthRequest(token))
+                        val api = ApiFactory.create(baseUrl, effectiveToken)
+                        api.auth(AuthRequest(effectiveToken))
                     }.onSuccess { response ->
                         statusMessage = if (response.isSuccessful) {
+                            settingsRepository.saveSettings(serverIp, effectiveToken)
+                            onContinue()
                             "Підключення успішне"
                         } else {
                             "Помилка: ${response.code()}"
@@ -100,7 +104,7 @@ fun LoginScreen(
             },
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Перевірити підключення")
+            Text("Автоматично підключитися")
         }
 
         if (statusMessage.isNotEmpty()) {
