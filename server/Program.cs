@@ -9,14 +9,16 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Http.Json;
 
-const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
-const string DefaultApiToken = "change-me";
-const int DiscoveryPort = 9999;
-const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
-const int ServerPort = 8000;
-const string StreamBoundary = "frame";
-const int SessionSweepIntervalSeconds = 30;
-const int DefaultSessionTimeoutSeconds = 15 * 60;
+static class AppConstants
+{
+    public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
+    public const string DefaultApiToken = "change-me";
+    public const int DiscoveryPort = 9999;
+    public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
+    public const int ServerPort = 8000;
+    public const string StreamBoundary = "frame";
+    public const int SessionSweepIntervalSeconds = 30;
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -192,7 +194,7 @@ app.MapPost("/system/power", (SystemPowerRequest request) =>
 
 app.MapGet("/screen/stream", async (HttpContext context, int fps = 5) =>
 {
-    context.Response.ContentType = $"multipart/x-mixed-replace; boundary={StreamBoundary}";
+    context.Response.ContentType = $"multipart/x-mixed-replace; boundary={AppConstants.StreamBoundary}";
 
     await foreach (var frame in ScreenCapture.StreamFrames(fps, context.RequestAborted))
     {
@@ -238,7 +240,7 @@ app.MapGet("/screen/recordings", (RecordingStore recordings) =>
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Urls.Clear();
-app.Urls.Add($"http://0.0.0.0:{ServerPort}");
+app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
 
 app.Run();
 
@@ -258,8 +260,8 @@ static class TokenHelper
 {
     public static string GetConfiguredToken()
     {
-        var token = Environment.GetEnvironmentVariable(ApiTokenEnv);
-        return string.IsNullOrWhiteSpace(token) ? DefaultApiToken : token;
+        var token = Environment.GetEnvironmentVariable(AppConstants.ApiTokenEnv);
+        return string.IsNullOrWhiteSpace(token) ? AppConstants.DefaultApiToken : token;
     }
 
     public static string? ExtractToken(HttpRequest request)
@@ -381,7 +383,7 @@ sealed class SessionSweepService(SessionStore sessions) : BackgroundService
 
             try
             {
-                await Task.Delay(TimeSpan.FromSeconds(SessionSweepIntervalSeconds), stoppingToken);
+                await Task.Delay(TimeSpan.FromSeconds(AppConstants.SessionSweepIntervalSeconds), stoppingToken);
             }
             catch (TaskCanceledException)
             {
@@ -395,9 +397,9 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var udp = new UdpClient(DiscoveryPort);
+        using var udp = new UdpClient(AppConstants.DiscoveryPort);
         udp.EnableBroadcast = true;
-        logger.LogInformation("Discovery listener started on UDP {Port}", DiscoveryPort);
+        logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -412,14 +414,14 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
             }
 
             var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
-            if (!string.Equals(message, DiscoveryMessage, StringComparison.Ordinal))
+            if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
             {
                 continue;
             }
 
             var payload = JsonSerializer.Serialize(new
             {
-                port = ServerPort,
+                port = AppConstants.ServerPort,
                 token = TokenHelper.GetConfiguredToken(),
                 ips = NetworkHelper.GetLocalIps(),
             });
@@ -526,7 +528,7 @@ static class ScreenCapture
         while (!token.IsCancellationRequested)
         {
             var frame = CapturePng();
-            var header = $"--{StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
+            var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
             var footer = "\r\n";
             var headerBytes = System.Text.Encoding.UTF8.GetBytes(header);
             var footerBytes = System.Text.Encoding.UTF8.GetBytes(footer);
@@ -910,7 +912,7 @@ sealed class RecordingStore
             while (!token.IsCancellationRequested)
             {
                 var frame = ScreenCapture.CapturePng();
-                var header = $"--{StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
+                var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
                 var footer = "\r\n";
 
                 await stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(header), token);
