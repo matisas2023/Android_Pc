@@ -1,4 +1,3 @@
-import io
 import json
 import logging
 import os
@@ -383,13 +382,6 @@ def encode_png_bytes(shot: mss.base.ScreenShot) -> bytes:
     return mss.tools.to_png(shot.rgb, shot.size)
 
 
-def encode_jpeg_bytes(shot: mss.base.ScreenShot, quality: int) -> bytes:
-    image = Image.frombytes("RGB", shot.size, shot.rgb)
-    buffer = io.BytesIO()
-    image.save(buffer, format="JPEG", quality=quality, optimize=False)
-    return buffer.getvalue()
-
-
 def multipart_frame(frame_bytes: bytes, content_type: str) -> bytes:
     return (
         f"--{STREAM_BOUNDARY}\r\n"
@@ -405,8 +397,8 @@ def generate_screen_stream(fps: int, quality: int):
             while True:
                 start = time.time()
                 shot = sct.grab(monitor)
-                jpeg_bytes = encode_jpeg_bytes(shot, quality)
-                yield multipart_frame(jpeg_bytes, "image/jpeg")
+                png_bytes = encode_png_bytes(shot)
+                yield multipart_frame(png_bytes, "image/png")
                 elapsed = time.time() - start
                 if elapsed < interval:
                     time.sleep(interval - elapsed)
