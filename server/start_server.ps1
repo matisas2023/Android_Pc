@@ -44,7 +44,7 @@ if (-not $env:PC_REMOTE_API_TOKEN) {
 
 Push-Location $root
 try {
-    & $pythonExec -m uvicorn main:app --host 0.0.0.0 --port 8000
+    & $pythonExec -m uvicorn main:app --app-dir $root --host 0.0.0.0 --port 8000
 } finally {
     Pop-Location
 }
