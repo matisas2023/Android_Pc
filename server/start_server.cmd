@@ -1,3 +1,13 @@
 @echo off
 setlocal
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0start_server.ps1"
+set SERVER_DIR=%~dp0
+pushd %SERVER_DIR%
+
+if "%PC_REMOTE_API_TOKEN%"=="" (
+  echo Using default token: change-me
+)
+
+dotnet run --project "%SERVER_DIR%PCRemoteServer.csproj"
+
+popd
+endlocal

@@ -52,7 +52,10 @@ private fun AppNavHost(
             )
         }
         composable(Routes.MainMenu.route) {
-            MainMenuScreen(navController = navController)
+            MainMenuScreen(
+                navController = navController,
+                settingsRepository = settingsRepository,
+            )
         }
         composable(Routes.Mouse.route) {
             MouseScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
