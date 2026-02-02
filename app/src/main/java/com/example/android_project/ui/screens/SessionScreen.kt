@@ -2,11 +2,13 @@ package com.example.android_project.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.ElevatedCard
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
@@ -30,6 +32,7 @@ import com.example.android_project.network.SessionHeartbeatRequest
 import com.example.android_project.network.SessionStartRequest
 import kotlinx.coroutines.launch
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
     val scope = rememberCoroutineScope()
@@ -208,7 +211,7 @@ fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
 @Composable
 private fun SectionCard(
     title: String,
-    content: @Composable Column.() -> Unit,
+    content: @Composable ColumnScope.() -> Unit,
 ) {
     ElevatedCard {
         Column(
