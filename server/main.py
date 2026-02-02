@@ -10,12 +10,11 @@ import uuid
 from datetime import datetime, timezone
 from typing import Dict, List, Optional
 
-import cv2
-import numpy as np
 import psutil
 import pyautogui
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from PIL import Image
 from pydantic import BaseModel, Field, validator
 from starlette import status
 
@@ -27,6 +26,7 @@ API_TOKEN_ENV = "PC_REMOTE_API_TOKEN"
 DEFAULT_API_TOKEN = "change-me"
 DISCOVERY_PORT = 9999
 DISCOVERY_MESSAGE = "PC_REMOTE_DISCOVERY"
+DISCOVERY_RESPONSE_PORT = 8000
 
 logging.basicConfig(
     level=logging.INFO,
@@ -58,7 +58,11 @@ def start_discovery_listener():
                 if message != DISCOVERY_MESSAGE:
                     continue
                 payload = json.dumps(
-                    {"port": 8000, "token": get_configured_token()},
+                    {
+                        "port": DISCOVERY_RESPONSE_PORT,
+                        "token": get_configured_token(),
+                        "ips": get_host_ips(),
+                    },
                 ).encode("utf-8")
                 sock.sendto(payload, addr)
 
@@ -92,6 +96,29 @@ async def startup_event():
 def get_configured_token() -> str:
     return os.getenv(API_TOKEN_ENV, DEFAULT_API_TOKEN)
 
+
+def get_host_ips() -> List[str]:
+    ips: List[str] = []
+    try:
+        hostname = socket.gethostname()
+        candidates = socket.getaddrinfo(hostname, None, family=socket.AF_INET)
+        for candidate in candidates:
+            ip = candidate[4][0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except socket.gaierror:
+        pass
+
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            ip = sock.getsockname()[0]
+            if ip not in ips and not ip.startswith("127."):
+                ips.append(ip)
+    except OSError:
+        pass
+
+    return ips or ["127.0.0.1"]
 
 def extract_token(request: Request) -> Optional[str]:
     auth_header = request.headers.get("Authorization")
@@ -356,25 +383,35 @@ def encode_png_bytes(shot: mss.base.ScreenShot) -> bytes:
     return mss.tools.to_png(shot.rgb, shot.size)
 
 
-def multipart_frame(png_bytes: bytes) -> bytes:
+def encode_jpeg_bytes(shot: mss.base.ScreenShot, quality: int) -> bytes:
+    image = Image.frombytes("RGB", shot.size, shot.rgb)
+    buffer = io.BytesIO()
+    image.save(buffer, format="JPEG", quality=quality, optimize=False)
+    return buffer.getvalue()
+
+
+def multipart_frame(frame_bytes: bytes, content_type: str) -> bytes:
     return (
         f"--{STREAM_BOUNDARY}\r\n"
-        "Content-Type: image/png\r\n\r\n"
-    ).encode("utf-8") + png_bytes + b"\r\n"
+        f"Content-Type: {content_type}\r\n\r\n"
+    ).encode("utf-8") + frame_bytes + b"\r\n"
 
 
-def generate_screen_stream(fps: int):
+def generate_screen_stream(fps: int, quality: int):
     interval = 1.0 / fps
     with mss.mss() as sct:
         monitor = sct.monitors[1]
-        while True:
-            start = time.time()
-            shot = sct.grab(monitor)
-            png_bytes = encode_png_bytes(shot)
-            yield multipart_frame(png_bytes)
-            elapsed = time.time() - start
-            if elapsed < interval:
-                time.sleep(interval - elapsed)
+        try:
+            while True:
+                start = time.time()
+                shot = sct.grab(monitor)
+                jpeg_bytes = encode_jpeg_bytes(shot, quality)
+                yield multipart_frame(jpeg_bytes, "image/jpeg")
+                elapsed = time.time() - start
+                if elapsed < interval:
+                    time.sleep(interval - elapsed)
+        except GeneratorExit:
+            logger.info("Screen stream closed by client")
 
 
 def generate_camera_stream(fps: int, quality: int, device_index: int):
@@ -399,10 +436,7 @@ def generate_camera_stream(fps: int, quality: int, device_index: int):
             success, buffer = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
             if not success:
                 raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to encode image.")
-            yield (
-                f"--{STREAM_BOUNDARY}\r\n"
-                "Content-Type: image/jpeg\r\n\r\n"
-            ).encode("utf-8") + buffer.tobytes() + b"\r\n"
+            yield multipart_frame(buffer.tobytes(), "image/jpeg")
             elapsed = time.time() - start
             if elapsed < interval:
                 time.sleep(interval - elapsed)
@@ -456,7 +490,7 @@ def record_screen_task(
                 while not stop_event.is_set():
                     shot = sct.grab(monitor)
                     png_bytes = encode_png_bytes(shot)
-                    frame_bytes = multipart_frame(png_bytes)
+                    frame_bytes = multipart_frame(png_bytes, "image/png")
                     handle.write(frame_bytes)
                     if duration_seconds and time.time() - start_time >= duration_seconds:
                         break
@@ -500,10 +534,10 @@ async def system_power(request: SystemPowerRequest):
 
 
 @app.get("/screen/stream")
-async def screen_stream(fps: int = 5):
-    logger.info("Screen stream request fps=%s", fps)
+async def screen_stream(fps: int = 5, quality: int = 80):
+    logger.info("Screen stream request fps=%s quality=%s", fps, quality)
     return StreamingResponse(
-        generate_screen_stream(fps),
+        generate_screen_stream(fps, quality),
         media_type=f"multipart/x-mixed-replace; boundary={STREAM_BOUNDARY}",
     )
 
