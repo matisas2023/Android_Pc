@@ -249,13 +249,26 @@ app.MapGet("/screen/recordings", (RecordingStore recordings) =>
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
 app.Urls.Clear();
-app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
+var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
+if (!string.IsNullOrWhiteSpace(configuredUrls))
+{
+    foreach (var url in configuredUrls.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
+    {
+        app.Urls.Add(url.Trim());
+    }
+}
+else
+{
+    app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
+    app.Urls.Add($"http://[::]:{AppConstants.ServerPort}");
+}
 
 app.Run();
 
 static class AppConstants
 {
     public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
+    public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
     public const string DefaultApiToken = "change-me";
     public const int DiscoveryPort = 9999;
     public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
@@ -874,7 +887,8 @@ static class AudioController
         }
 
         Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out var device));
-        Marshal.ThrowExceptionForHR(device.Activate(ref IAudioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
+        var audioEndpointVolumeGuid = IAudioEndpointVolumeGuid;
+        Marshal.ThrowExceptionForHR(device.Activate(ref audioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
         var volume = (IAudioEndpointVolume)volumeObject;
         Marshal.ThrowExceptionForHR(volume.SetMasterVolumeLevelScalar(clamped, Guid.Empty));
     }
@@ -1295,7 +1309,9 @@ static class BatteryReader
             var present = status.BatteryChargeStatus != System.Windows.Forms.BatteryChargeStatus.NoSystemBattery;
             var percent = (int)Math.Round(status.BatteryLifePercent * 100);
             var charging = status.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online;
-            var seconds = status.BatteryLifeRemaining >= 0 ? status.BatteryLifeRemaining : null;
+            var seconds = status.BatteryLifeRemaining >= 0
+                ? (int?)status.BatteryLifeRemaining
+                : null;
             return new BatteryInfo(present, percent, charging, seconds);
         }
         catch

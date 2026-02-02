@@ -44,7 +44,10 @@ fun KeyboardScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
     ) {
         Text(text = "Керування клавіатурою", style = MaterialTheme.typography.headlineMedium)
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
             Button(onClick = onBack) { Text("Назад") }
             Button(
                 onClick = {
@@ -66,23 +69,66 @@ fun KeyboardScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
             }
         }
 
+        Text(text = "Стрілки керування", style = MaterialTheme.typography.titleMedium)
+        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+            Button(
+                onClick = {
+                    scope.launch {
+                        status = api?.let { sendKey(it, "up") } ?: "Налаштуйте сервер"
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("↑")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        status = api?.let { sendKey(it, "down") } ?: "Налаштуйте сервер"
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("↓")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        status = api?.let { sendKey(it, "left") } ?: "Налаштуйте сервер"
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("←")
+            }
+            Button(
+                onClick = {
+                    scope.launch {
+                        status = api?.let { sendKey(it, "right") } ?: "Налаштуйте сервер"
+                    }
+                },
+                modifier = Modifier.weight(1f),
+            ) {
+                Text("→")
+            }
+        }
+
         OutlinedTextField(
             value = inputText,
-            onValueChange = { inputText = it },
-            label = { Text("Текст для відправки") },
-            modifier = Modifier.fillMaxWidth(),
-        )
-
-        Button(
-            onClick = {
-                scope.launch {
-                    status = api?.let { sendText(it, inputText) } ?: "Налаштуйте сервер"
+            onValueChange = { newText ->
+                val previousText = inputText
+                inputText = newText
+                if (api == null) {
+                    status = "Налаштуйте сервер"
+                } else {
+                    scope.launch {
+                        status = sendTextDelta(api, previousText, newText)
+                    }
                 }
             },
+            label = { Text("Друкуйте текст") },
             modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Надіслати текст")
-        }
+        )
 
         Spacer(modifier = Modifier.height(4.dp))
 
@@ -117,4 +163,40 @@ private suspend fun sendText(api: com.example.android_project.network.ApiService
         onSuccess = { "Текст надіслано" },
         onFailure = { "Помилка: ${it.localizedMessage}" },
     )
+}
+
+private suspend fun sendTextDelta(
+    api: com.example.android_project.network.ApiService,
+    previousText: String,
+    newText: String,
+): String {
+    if (previousText == newText) return "Готово"
+    return when {
+        newText.startsWith(previousText) -> {
+            sendText(api, newText.removePrefix(previousText))
+        }
+        previousText.startsWith(newText) -> {
+            val backspaces = previousText.length - newText.length
+            runCatching {
+                repeat(backspaces) {
+                    api.keyboardPress(KeyboardPressRequest(key = "backspace"))
+                    delay(20)
+                }
+            }.fold(
+                onSuccess = { "Готово" },
+                onFailure = { "Помилка: ${it.localizedMessage}" },
+            )
+        }
+        else -> {
+            runCatching {
+                repeat(previousText.length) {
+                    api.keyboardPress(KeyboardPressRequest(key = "backspace"))
+                    delay(20)
+                }
+            }.fold(
+                onSuccess = { sendText(api, newText) },
+                onFailure = { "Помилка: ${it.localizedMessage}" },
+            )
+        }
+    }
 }
