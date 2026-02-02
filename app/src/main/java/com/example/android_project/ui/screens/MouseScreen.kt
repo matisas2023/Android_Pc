@@ -1,12 +1,16 @@
 package com.example.android_project.ui.screens
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -18,12 +22,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.unit.dp
 import com.example.android_project.data.SettingsRepository
 import com.example.android_project.network.ApiFactory
 import com.example.android_project.network.MouseClickRequest
 import com.example.android_project.network.MouseMoveRequest
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 
 @Composable
 fun MouseScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
@@ -44,49 +50,38 @@ fun MouseScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
 
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(onClick = onBack) { Text("Назад") }
-            Button(
-                onClick = {
-                    scope.launch {
-                        status = api?.let { sendMouseMove(it, 0, -50) } ?: "Налаштуйте сервер"
-                    }
-                },
-            ) {
-                Text("Вгору")
-            }
-            Button(
-                onClick = {
-                    scope.launch {
-                        status = api?.let { sendMouseMove(it, 0, 50) } ?: "Налаштуйте сервер"
-                    }
-                },
-            ) {
-                Text("Вниз")
-            }
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            Button(
-                onClick = {
-                    scope.launch {
-                        status = api?.let { sendMouseMove(it, -50, 0) } ?: "Налаштуйте сервер"
+        Text(text = "Трекпад", style = MaterialTheme.typography.titleMedium)
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(240.dp)
+                .background(
+                    color = MaterialTheme.colorScheme.surfaceVariant,
+                    shape = RoundedCornerShape(16.dp),
+                )
+                .pointerInput(api) {
+                    detectDragGestures { change, dragAmount ->
+                        change.consume()
+                        if (api == null) {
+                            status = "Налаштуйте сервер"
+                        } else {
+                            scope.launch {
+                                status = sendMouseMove(
+                                    api,
+                                    dragAmount.x.roundToInt(),
+                                    dragAmount.y.roundToInt(),
+                                )
+                            }
+                        }
                     }
                 },
-            ) {
-                Text("Вліво")
-            }
-            Button(
-                onClick = {
-                    scope.launch {
-                        status = api?.let { sendMouseMove(it, 50, 0) } ?: "Налаштуйте сервер"
-                    }
-                },
-            ) {
-                Text("Вправо")
-            }
-        }
+        )
 
         Spacer(modifier = Modifier.height(8.dp))
 
+        Text(text = "Віртуальні кнопки", style = MaterialTheme.typography.titleMedium)
         Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Button(
                 onClick = {
