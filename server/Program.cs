@@ -874,7 +874,8 @@ static class AudioController
         }
 
         Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out var device));
-        Marshal.ThrowExceptionForHR(device.Activate(ref IAudioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
+        var audioEndpointVolumeGuid = IAudioEndpointVolumeGuid;
+        Marshal.ThrowExceptionForHR(device.Activate(ref audioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
         var volume = (IAudioEndpointVolume)volumeObject;
         Marshal.ThrowExceptionForHR(volume.SetMasterVolumeLevelScalar(clamped, Guid.Empty));
     }
@@ -1295,7 +1296,9 @@ static class BatteryReader
             var present = status.BatteryChargeStatus != System.Windows.Forms.BatteryChargeStatus.NoSystemBattery;
             var percent = (int)Math.Round(status.BatteryLifePercent * 100);
             var charging = status.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online;
-            var seconds = status.BatteryLifeRemaining >= 0 ? status.BatteryLifeRemaining : null;
+            var seconds = status.BatteryLifeRemaining >= 0
+                ? (int?)status.BatteryLifeRemaining
+                : null;
             return new BatteryInfo(present, percent, charging, seconds);
         }
         catch
