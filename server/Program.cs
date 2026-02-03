@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Management;
 using Microsoft.AspNetCore.Http.Json;
+using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,9 +22,11 @@ builder.Services.Configure<JsonOptions>(options =>
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<RecordingStore>();
 builder.Services.AddSingleton<MetricsStore>();
+builder.Services.AddSingleton<TunnelState>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
 builder.Services.AddHostedService<MetricsSamplingService>();
+builder.Services.AddHostedService<CloudflareTunnelService>();
 
 var app = builder.Build();
 
@@ -247,6 +250,10 @@ app.MapGet("/screen/recordings", (RecordingStore recordings) =>
 });
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/tunnel/status", (TunnelState tunnelState) =>
+{
+    return Results.Ok(tunnelState.GetSnapshot());
+});
 
 app.Urls.Clear();
 var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
@@ -269,12 +276,14 @@ static class AppConstants
 {
     public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
     public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
+    public const string TunnelEnabledEnv = "PC_REMOTE_TUNNEL_ENABLE";
     public const string DefaultApiToken = "change-me";
     public const int DiscoveryPort = 9999;
     public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
     public const int ServerPort = 8000;
     public const string StreamBoundary = "frame";
     public const int SessionSweepIntervalSeconds = 30;
+    public const string CloudflaredBaseUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download";
 }
 
 record AuthRequest(string Token);
@@ -427,7 +436,7 @@ sealed class SessionSweepService(SessionStore sessions) : BackgroundService
     }
 }
 
-sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
+sealed class DiscoveryService(ILogger<DiscoveryService> logger, TunnelState tunnelState) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -453,11 +462,13 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
                 continue;
             }
 
+            var tunnelSnapshot = tunnelState.GetSnapshot();
             var payload = JsonSerializer.Serialize(new
             {
                 port = AppConstants.ServerPort,
                 token = TokenHelper.GetConfiguredToken(),
                 ips = NetworkHelper.GetLocalIps(),
+                tunnelUrl = tunnelSnapshot.Url,
             });
 
             var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
@@ -493,6 +504,234 @@ static class NetworkHelper
         }
 
         return ips.Count > 0 ? ips.ToList() : new List<string> { "127.0.0.1" };
+    }
+}
+
+sealed class TunnelState
+{
+    private readonly object _lock = new();
+    private TunnelSnapshot _snapshot = new(null, "disabled", null, null);
+
+    public void Update(TunnelSnapshot snapshot)
+    {
+        lock (_lock)
+        {
+            _snapshot = snapshot;
+        }
+    }
+
+    public TunnelSnapshot GetSnapshot()
+    {
+        lock (_lock)
+        {
+            return _snapshot;
+        }
+    }
+}
+
+record TunnelSnapshot(string? Url, string Status, DateTimeOffset? StartedAt, string? Error);
+
+sealed class CloudflareTunnelService(
+    ILogger<CloudflareTunnelService> logger,
+    TunnelState tunnelState) : BackgroundService
+{
+    private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.trycloudflare\.com";
+    private Process? _process;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (!IsTunnelEnabled())
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "disabled", null, null));
+            return;
+        }
+
+        var startedAt = DateTimeOffset.UtcNow;
+        tunnelState.Update(new TunnelSnapshot(null, "starting", startedAt, null));
+
+        try
+        {
+            var cloudflaredPath = await EnsureCloudflaredAsync(stoppingToken);
+            if (cloudflaredPath == null)
+            {
+                tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Cloudflared download failed."));
+                return;
+            }
+
+            var localUrl = $"http://127.0.0.1:{AppConstants.ServerPort}";
+            var processStartInfo = new ProcessStartInfo
+            {
+                FileName = cloudflaredPath,
+                Arguments = $"tunnel --url {localUrl} --no-autoupdate",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+
+            _process = new Process { StartInfo = processStartInfo, EnableRaisingEvents = true };
+            _process.OutputDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+            _process.ErrorDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+            _process.Exited += (_, _) =>
+            {
+                var snapshot = tunnelState.GetSnapshot();
+                if (snapshot.Status != "error")
+                {
+                    tunnelState.Update(snapshot with { Status = "stopped", Error = "Cloudflared exited." });
+                }
+            };
+
+            if (!_process.Start())
+            {
+                tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start cloudflared."));
+                return;
+            }
+
+            _process.BeginOutputReadLine();
+            _process.BeginErrorReadLine();
+
+            await Task.Delay(Timeout.Infinite, stoppingToken);
+        }
+        catch (TaskCanceledException)
+        {
+        }
+        catch (Exception ex)
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
+            logger.LogError(ex, "Cloudflared tunnel failed.");
+        }
+    }
+
+    public override Task StopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_process is { HasExited: false })
+            {
+                _process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to stop cloudflared process.");
+        }
+
+        return base.StopAsync(cancellationToken);
+    }
+
+    private static bool IsTunnelEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(AppConstants.TunnelEnabledEnv);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private async Task<string?> EnsureCloudflaredAsync(CancellationToken stoppingToken)
+    {
+        var downloadUrl = GetCloudflaredDownloadUrl();
+        if (downloadUrl == null)
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "error", DateTimeOffset.UtcNow, "Unsupported OS for tunnel."));
+            return null;
+        }
+
+        var baseDir = Path.Combine(AppContext.BaseDirectory, "tunnel");
+        Directory.CreateDirectory(baseDir);
+        var fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cloudflared.exe" : "cloudflared";
+        var targetPath = Path.Combine(baseDir, fileName);
+
+        if (File.Exists(targetPath))
+        {
+            return targetPath;
+        }
+
+        try
+        {
+            using var http = new HttpClient();
+            using var response = await http.GetAsync(downloadUrl, stoppingToken);
+            response.EnsureSuccessStatusCode();
+
+            await using var stream = await response.Content.ReadAsStreamAsync(stoppingToken);
+            await using var fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
+            await stream.CopyToAsync(fileStream, stoppingToken);
+
+            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                try
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = "chmod",
+                        Arguments = $"+x \"{targetPath}\"",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                    })?.WaitForExit();
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "Failed to chmod cloudflared binary.");
+                }
+            }
+
+            return targetPath;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to download cloudflared.");
+            tunnelState.Update(new TunnelSnapshot(null, "error", DateTimeOffset.UtcNow, ex.Message));
+            return null;
+        }
+    }
+
+    private static string? GetCloudflaredDownloadUrl()
+    {
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-windows-amd64.exe";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-linux-amd64";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-darwin-amd64";
+        }
+
+        return null;
+    }
+
+    private void HandleProcessOutput(string? line, DateTimeOffset startedAt)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        logger.LogInformation("cloudflared: {Line}", line.Trim());
+
+        var match = Regex.Match(line, UrlPattern);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        var url = match.Value;
+        var snapshot = tunnelState.GetSnapshot();
+        if (snapshot.Url == url && snapshot.Status == "ready")
+        {
+            return;
+        }
+
+        tunnelState.Update(new TunnelSnapshot(url, "ready", startedAt, null));
     }
 }
 
