@@ -11,6 +11,7 @@ data class DiscoveredServer(
     val host: String,
     val port: Int,
     val token: String?,
+    val tunnelUrl: String?,
 )
 
 object ServerDiscovery {
@@ -40,10 +41,12 @@ object ServerDiscovery {
             val payload = runCatching { JSONObject(responseText) }.getOrNull()
             val port = payload?.optInt("port", 8000) ?: 8000
             val token = payload?.optString("token", null)
+            val tunnelUrl = payload?.optString("tunnelUrl", null)?.takeIf { it.isNotBlank() }
             DiscoveredServer(
                 host = response.address.hostAddress,
                 port = port,
                 token = token,
+                tunnelUrl = tunnelUrl,
             )
         } catch (error: Exception) {
             null
