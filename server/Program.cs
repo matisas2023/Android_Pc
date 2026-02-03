@@ -536,6 +536,10 @@ sealed class CloudflareTunnelService(
     TunnelState tunnelState) : BackgroundService
 {
     private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.trycloudflare\.com";
+<<<<<<< codex/integrate-vpn-tunnel-into-app-and-server-7jmgfr
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
+=======
+>>>>>>> master
     private Process? _process;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -547,6 +551,76 @@ sealed class CloudflareTunnelService(
         }
 
         var startedAt = DateTimeOffset.UtcNow;
+<<<<<<< codex/integrate-vpn-tunnel-into-app-and-server-7jmgfr
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "starting", startedAt, null));
+
+            try
+            {
+                var cloudflaredPath = await EnsureCloudflaredAsync(stoppingToken);
+                if (cloudflaredPath == null)
+                {
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Cloudflared download failed."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
+
+                var localUrl = $"http://127.0.0.1:{AppConstants.ServerPort}";
+                var processStartInfo = new ProcessStartInfo
+                {
+                    FileName = cloudflaredPath,
+                    Arguments = $"tunnel --url {localUrl} --no-autoupdate",
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                _process = new Process { StartInfo = processStartInfo, EnableRaisingEvents = true };
+                _process.OutputDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+                _process.ErrorDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+                _process.Exited += (_, _) =>
+                {
+                    var snapshot = tunnelState.GetSnapshot();
+                    if (snapshot.Status != "error")
+                    {
+                        tunnelState.Update(snapshot with { Status = "stopped", Error = "Cloudflared exited." });
+                    }
+                };
+
+                if (!_process.Start())
+                {
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start cloudflared."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
+
+                _process.BeginOutputReadLine();
+                _process.BeginErrorReadLine();
+
+                await _process.WaitForExitAsync(stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
+                logger.LogError(ex, "Cloudflared tunnel failed.");
+            }
+
+            try
+            {
+                await Task.Delay(RetryDelay, stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+=======
         tunnelState.Update(new TunnelSnapshot(null, "starting", startedAt, null));
 
         try
@@ -599,6 +673,7 @@ sealed class CloudflareTunnelService(
         {
             tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
             logger.LogError(ex, "Cloudflared tunnel failed.");
+>>>>>>> master
         }
     }
 
