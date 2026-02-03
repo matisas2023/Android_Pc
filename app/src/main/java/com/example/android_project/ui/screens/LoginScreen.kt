@@ -44,7 +44,7 @@ fun LoginScreen(
             statusMessage = "Пошук сервера..."
             val discovered = ServerDiscovery.discover()
             if (discovered != null) {
-                serverIp = "${discovered.host}:${discovered.port}"
+                serverIp = discovered.tunnelUrl ?: "${discovered.host}:${discovered.port}"
                 token = discovered.token.orEmpty().ifBlank { "change-me" }
                 settingsRepository.saveSettings(serverIp, token)
                 statusMessage = "Підключення знайдено"
@@ -122,7 +122,7 @@ fun LoginScreen(
                         statusMessage = "Сервер не знайдено"
                         return@launch
                     }
-                    serverIp = "${discovered.host}:${discovered.port}"
+                    serverIp = discovered.tunnelUrl ?: "${discovered.host}:${discovered.port}"
                     token = discovered.token.orEmpty()
                     settingsRepository.saveSettings(serverIp, token)
                     statusMessage = "Перевірка..."

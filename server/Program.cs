@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Management;
 using Microsoft.AspNetCore.Http.Json;
+using System.Text.RegularExpressions;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -21,9 +22,11 @@ builder.Services.Configure<JsonOptions>(options =>
 builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<RecordingStore>();
 builder.Services.AddSingleton<MetricsStore>();
+builder.Services.AddSingleton<TunnelState>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
 builder.Services.AddHostedService<MetricsSamplingService>();
+builder.Services.AddHostedService<SshTunnelService>();
 
 var app = builder.Build();
 
@@ -247,6 +250,10 @@ app.MapGet("/screen/recordings", (RecordingStore recordings) =>
 });
 
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+app.MapGet("/tunnel/status", (TunnelState tunnelState) =>
+{
+    return Results.Ok(tunnelState.GetSnapshot());
+});
 
 app.Urls.Clear();
 var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
@@ -269,6 +276,7 @@ static class AppConstants
 {
     public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
     public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
+    public const string TunnelEnabledEnv = "PC_REMOTE_TUNNEL_ENABLE";
     public const string DefaultApiToken = "change-me";
     public const int DiscoveryPort = 9999;
     public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
@@ -427,7 +435,7 @@ sealed class SessionSweepService(SessionStore sessions) : BackgroundService
     }
 }
 
-sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
+sealed class DiscoveryService(ILogger<DiscoveryService> logger, TunnelState tunnelState) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -453,11 +461,13 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
                 continue;
             }
 
+            var tunnelSnapshot = tunnelState.GetSnapshot();
             var payload = JsonSerializer.Serialize(new
             {
                 port = AppConstants.ServerPort,
                 token = TokenHelper.GetConfiguredToken(),
                 ips = NetworkHelper.GetLocalIps(),
+                tunnelUrl = tunnelSnapshot.Url,
             });
 
             var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
@@ -493,6 +503,213 @@ static class NetworkHelper
         }
 
         return ips.Count > 0 ? ips.ToList() : new List<string> { "127.0.0.1" };
+    }
+}
+
+sealed class TunnelState
+{
+    private readonly object _lock = new();
+    private TunnelSnapshot _snapshot = new(null, "disabled", null, null);
+
+    public void Update(TunnelSnapshot snapshot)
+    {
+        lock (_lock)
+        {
+            _snapshot = snapshot;
+        }
+    }
+
+    public TunnelSnapshot GetSnapshot()
+    {
+        lock (_lock)
+        {
+            return _snapshot;
+        }
+    }
+}
+
+record TunnelSnapshot(string? Url, string Status, DateTimeOffset? StartedAt, string? Error);
+
+sealed class SshTunnelService(
+    ILogger<SshTunnelService> logger,
+    TunnelState tunnelState) : BackgroundService
+{
+    private const string UrlPattern = @"https://[-a-zA-Z0-9]+(\.lhrtunnel\.link|\.localhost\.run)";
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
+    private Process? _process;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (!IsTunnelEnabled())
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "disabled", null, null));
+            return;
+        }
+
+        var startedAt = DateTimeOffset.UtcNow;
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            tunnelState.Update(new TunnelSnapshot(null, "starting", startedAt, null));
+
+            try
+            {
+                var sshPath = ResolveSshPath();
+                if (sshPath == null)
+                {
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "SSH client not found."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
+
+                var localUrl = $"http://127.0.0.1:{AppConstants.ServerPort}";
+                var processStartInfo = new ProcessStartInfo
+                {
+                    FileName = sshPath,
+                    Arguments = BuildTunnelArgs(localUrl),
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                };
+
+                _process = new Process { StartInfo = processStartInfo, EnableRaisingEvents = true };
+                _process.OutputDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+                _process.ErrorDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
+                _process.Exited += (_, _) =>
+                {
+                    var snapshot = tunnelState.GetSnapshot();
+                    if (snapshot.Status != "error")
+                    {
+                        tunnelState.Update(snapshot with { Status = "stopped", Error = "SSH tunnel exited." });
+                    }
+                };
+
+                if (!_process.Start())
+                {
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start SSH tunnel."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
+
+                _process.BeginOutputReadLine();
+                _process.BeginErrorReadLine();
+
+                await _process.WaitForExitAsync(stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
+                logger.LogError(ex, "SSH tunnel failed.");
+            }
+
+            try
+            {
+                await Task.Delay(RetryDelay, stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    public override Task StopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_process is { HasExited: false })
+            {
+                _process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to stop SSH tunnel process.");
+        }
+
+        return base.StopAsync(cancellationToken);
+    }
+
+    private static bool IsTunnelEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(AppConstants.TunnelEnabledEnv);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string? ResolveSshPath()
+    {
+        var candidates = new List<string>();
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            candidates.Add("ssh.exe");
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe"));
+        }
+        else
+        {
+            candidates.Add("ssh");
+            candidates.Add("/usr/bin/ssh");
+            candidates.Add("/usr/local/bin/ssh");
+        }
+
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private static string BuildTunnelArgs(string localUrl)
+    {
+        var localHost = new Uri(localUrl).Port;
+        var forward = $"80:localhost:{localHost}";
+        return $"-o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -T -R {forward} nokey@localhost.run";
+    }
+
+    private void HandleProcessOutput(string? line, DateTimeOffset startedAt)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return;
+        }
+
+        logger.LogInformation("ssh-tunnel: {Line}", line.Trim());
+
+        var match = Regex.Match(line, UrlPattern);
+        if (!match.Success)
+        {
+            return;
+        }
+
+        var url = match.Value;
+        var snapshot = tunnelState.GetSnapshot();
+        if (snapshot.Url == url && snapshot.Status == "ready")
+        {
+            return;
+        }
+
+        tunnelState.Update(new TunnelSnapshot(url, "ready", startedAt, null));
     }
 }
 
