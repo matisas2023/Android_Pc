@@ -783,7 +783,7 @@ sealed class UpnpPortMappingService(
 
                 using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
                 discoveryCts.CancelAfter(TimeSpan.FromSeconds(5));
-                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts.Token);
+                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts);
 
                 var externalIp = await device.GetExternalIPAsync();
                 _mapping = new Mapping(Protocol.Tcp, AppConstants.ServerPort, AppConstants.ServerPort, MappingDescription);
@@ -827,7 +827,7 @@ sealed class UpnpPortMappingService(
             {
                 var discoverer = new NatDiscoverer();
                 using var discoveryCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts.Token);
+                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts);
                 await device.DeletePortMapAsync(_mapping);
             }
         }
