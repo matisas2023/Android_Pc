@@ -36,11 +36,7 @@ dotnet run --project PCRemoteServer.csproj
 - автознайдення в Android (в UDP відповіді `tunnelUrl`),
 - або `GET /tunnel/status` (повертає `url`, `status`).
 
-<<<<<<< codex/integrate-vpn-tunnel-into-app-and-server-7jmgfr
 > Потрібен доступ до інтернету та DNS; якщо тунель тимчасово не створюється, сервіс повторюватиме спроби.
-
-=======
->>>>>>> master
 Щоб вимкнути вбудований тунель, задайте змінну середовища `PC_REMOTE_TUNNEL_ENABLE=0`.
 
 ## Рекомендований VPN/тунель (CGNAT)
