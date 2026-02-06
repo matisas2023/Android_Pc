@@ -253,7 +253,7 @@ fun SystemScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                     }
 
                     systemStatus?.let { status ->
-                        Text("CPU: ${status.cpu_percent}%")
+                        Text("CPU: ${status.cpuPercent}%")
                         Text("RAM: ${status.memory.percent}% (використано ${formatBytes(status.memory.used)})")
                     }
                 }
