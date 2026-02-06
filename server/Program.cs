@@ -573,8 +573,8 @@ sealed class TunnelState
 
 record TunnelSnapshot(string? Url, string Status, DateTimeOffset? StartedAt, string? Error);
 
-sealed class CloudflareTunnelService(
-    ILogger<CloudflareTunnelService> logger,
+sealed class SshTunnelService(
+    ILogger<SshTunnelService> logger,
     TunnelState tunnelState) : BackgroundService
 {
     private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.trycloudflare\.com";
@@ -608,8 +608,8 @@ sealed class CloudflareTunnelService(
                 var localUrl = $"http://127.0.0.1:{AppConstants.ServerPort}";
                 var processStartInfo = new ProcessStartInfo
                 {
-                    FileName = cloudflaredPath,
-                    Arguments = $"tunnel --url {localUrl} --no-autoupdate",
+                    FileName = sshPath,
+                    Arguments = BuildTunnelArgs(localUrl),
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     UseShellExecute = false,
@@ -624,13 +624,13 @@ sealed class CloudflareTunnelService(
                     var snapshot = tunnelState.GetSnapshot();
                     if (snapshot.Status != "error")
                     {
-                        tunnelState.Update(snapshot with { Status = "stopped", Error = "Cloudflared exited." });
+                        tunnelState.Update(snapshot with { Status = "stopped", Error = "SSH tunnel exited." });
                     }
                 };
 
                 if (!_process.Start())
                 {
-                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start cloudflared."));
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start SSH tunnel."));
                     await Task.Delay(RetryDelay, stoppingToken);
                     continue;
                 }
@@ -647,7 +647,7 @@ sealed class CloudflareTunnelService(
             catch (Exception ex)
             {
                 tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
-                logger.LogError(ex, "Cloudflared tunnel failed.");
+                logger.LogError(ex, "SSH tunnel failed.");
             }
 
             try
@@ -672,7 +672,7 @@ sealed class CloudflareTunnelService(
         }
         catch (Exception ex)
         {
-            logger.LogWarning(ex, "Failed to stop cloudflared process.");
+            logger.LogWarning(ex, "Failed to stop SSH tunnel process.");
         }
 
         return base.StopAsync(cancellationToken);
@@ -691,81 +691,43 @@ sealed class CloudflareTunnelService(
             && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
     }
 
-    private async Task<string?> EnsureCloudflaredAsync(CancellationToken stoppingToken)
+    private static string? ResolveSshPath()
     {
-        var downloadUrl = GetCloudflaredDownloadUrl();
-        if (downloadUrl == null)
-        {
-            tunnelState.Update(new TunnelSnapshot(null, "error", DateTimeOffset.UtcNow, "Unsupported OS for tunnel."));
-            return null;
-        }
-
-        var baseDir = Path.Combine(AppContext.BaseDirectory, "tunnel");
-        Directory.CreateDirectory(baseDir);
-        var fileName = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "cloudflared.exe" : "cloudflared";
-        var targetPath = Path.Combine(baseDir, fileName);
-
-        if (File.Exists(targetPath))
-        {
-            return targetPath;
-        }
-
-        try
-        {
-            using var http = new HttpClient();
-            using var response = await http.GetAsync(downloadUrl, stoppingToken);
-            response.EnsureSuccessStatusCode();
-
-            await using var stream = await response.Content.ReadAsStreamAsync(stoppingToken);
-            await using var fileStream = new FileStream(targetPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            await stream.CopyToAsync(fileStream, stoppingToken);
-
-            if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            {
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = "chmod",
-                        Arguments = $"+x \"{targetPath}\"",
-                        UseShellExecute = false,
-                        CreateNoWindow = true,
-                    })?.WaitForExit();
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Failed to chmod cloudflared binary.");
-                }
-            }
-
-            return targetPath;
-        }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to download cloudflared.");
-            tunnelState.Update(new TunnelSnapshot(null, "error", DateTimeOffset.UtcNow, ex.Message));
-            return null;
-        }
-    }
-
-    private static string? GetCloudflaredDownloadUrl()
-    {
+        var candidates = new List<string>();
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
         {
-            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-windows-amd64.exe";
+            candidates.Add("ssh.exe");
+            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe"));
+        }
+        else
+        {
+            candidates.Add("ssh");
+            candidates.Add("/usr/bin/ssh");
+            candidates.Add("/usr/local/bin/ssh");
         }
 
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        foreach (var candidate in candidates)
         {
-            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-linux-amd64";
-        }
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
-        {
-            return $"{AppConstants.CloudflaredBaseUrl}/cloudflared-darwin-amd64";
+            try
+            {
+                if (File.Exists(candidate))
+                {
+                    return candidate;
+                }
+            }
+            catch
+            {
+            }
         }
 
         return null;
+    }
+
+    private static string BuildTunnelArgs(string localUrl)
+    {
+        var localHost = new Uri(localUrl).Port;
+        var forward = $"80:localhost:{localHost}";
+        return $"-o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -T -R {forward} nokey@localhost.run";
     }
 
     private void HandleProcessOutput(string? line, DateTimeOffset startedAt)
@@ -775,7 +737,7 @@ sealed class CloudflareTunnelService(
             return;
         }
 
-        logger.LogInformation("cloudflared: {Line}", line.Trim());
+        logger.LogInformation("ssh-tunnel: {Line}", line.Trim());
 
         var match = Regex.Match(line, UrlPattern);
         if (!match.Success)
