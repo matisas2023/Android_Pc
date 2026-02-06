@@ -361,6 +361,7 @@ private fun MjpegStreamView(
     token: String,
     modifier: Modifier = Modifier,
 ) {
+    val effectiveToken = token.ifBlank { "change-me" }
     AndroidView(
         factory = { context ->
             WebView(context).apply {
@@ -371,7 +372,13 @@ private fun MjpegStreamView(
             }
         },
         update = { webView ->
-            webView.loadUrl(url, mapOf("X-API-Token" to token))
+            webView.loadUrl(
+                url,
+                mapOf(
+                    "X-API-Token" to effectiveToken,
+                    "Authorization" to "Bearer $effectiveToken",
+                ),
+            )
         },
         modifier = modifier,
     )
