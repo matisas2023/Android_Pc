@@ -14,6 +14,7 @@ object ApiFactory {
             val request = chain.request()
                 .newBuilder()
                 .addHeader("X-API-Token", token)
+                .addHeader("Authorization", "Bearer $token")
                 .build()
             chain.proceed(request)
         }
