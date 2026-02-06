@@ -45,10 +45,14 @@ fun LoginScreen(
             val discovered = ServerDiscovery.discover()
             if (discovered != null) {
                 serverIp = resolveServerAddress(discovered)
-                token = discovered.token.orEmpty().ifBlank { "change-me" }
-                settingsRepository.saveSettings(serverIp, token)
-                statusMessage = "Підключення знайдено"
-                onContinue()
+                token = discovered.token.orEmpty()
+                attemptConnection(
+                    serverIp = serverIp,
+                    token = token,
+                    settingsRepository = settingsRepository,
+                    onContinue = onContinue,
+                    setStatus = { statusMessage = it },
+                )
             } else {
                 statusMessage = "Сервер не знайдено"
             }
@@ -85,27 +89,13 @@ fun LoginScreen(
         Button(
             onClick = {
                 scope.launch {
-                    val baseUrl = normalizeBaseUrl(serverIp)
-                    if (baseUrl == null) {
-                        statusMessage = "Не вдалося сформувати адресу"
-                        return@launch
-                    }
-                    statusMessage = "Перевірка..."
-                    val effectiveToken = token.ifBlank { "change-me" }
-                    runCatching {
-                        val api = ApiFactory.create(baseUrl, effectiveToken)
-                        api.auth(AuthRequest(effectiveToken))
-                    }.onSuccess { response ->
-                        statusMessage = if (response.isSuccessful) {
-                            settingsRepository.saveSettings(serverIp, effectiveToken)
-                            onContinue()
-                            "Підключення успішне"
-                        } else {
-                            "Помилка: ${response.code()}"
-                        }
-                    }.onFailure { error ->
-                        statusMessage = "Помилка: ${error.localizedMessage}"
-                    }
+                    attemptConnection(
+                        serverIp = serverIp,
+                        token = token,
+                        settingsRepository = settingsRepository,
+                        onContinue = onContinue,
+                        setStatus = { statusMessage = it },
+                    )
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -124,28 +114,13 @@ fun LoginScreen(
                     }
                     serverIp = resolveServerAddress(discovered)
                     token = discovered.token.orEmpty()
-                    settingsRepository.saveSettings(serverIp, token)
-                    statusMessage = "Перевірка..."
-                    val baseUrl = normalizeBaseUrl(serverIp)
-                    if (baseUrl == null) {
-                        statusMessage = "Не вдалося сформувати адресу"
-                        return@launch
-                    }
-                    val effectiveToken = token.ifBlank { "change-me" }
-                    runCatching {
-                        val api = ApiFactory.create(baseUrl, effectiveToken)
-                        api.auth(AuthRequest(effectiveToken))
-                    }.onSuccess { response ->
-                        statusMessage = if (response.isSuccessful) {
-                            settingsRepository.saveSettings(serverIp, effectiveToken)
-                            onContinue()
-                            "Підключення успішне"
-                        } else {
-                            "Помилка: ${response.code()}"
-                        }
-                    }.onFailure { error ->
-                        statusMessage = "Помилка: ${error.localizedMessage}"
-                    }
+                    attemptConnection(
+                        serverIp = serverIp,
+                        token = token,
+                        settingsRepository = settingsRepository,
+                        onContinue = onContinue,
+                        setStatus = { statusMessage = it },
+                    )
                 }
             },
             modifier = Modifier.fillMaxWidth(),
@@ -175,4 +150,34 @@ private fun resolveServerAddress(discovered: com.example.android_project.network
     return discovered.tunnelUrl
         ?: discovered.externalUrl
         ?: "${discovered.host}:${discovered.port}"
+}
+
+private suspend fun attemptConnection(
+    serverIp: String,
+    token: String,
+    settingsRepository: SettingsRepository,
+    onContinue: () -> Unit,
+    setStatus: (String) -> Unit,
+) {
+    val baseUrl = normalizeBaseUrl(serverIp)
+    if (baseUrl == null) {
+        setStatus("Не вдалося сформувати адресу")
+        return
+    }
+    setStatus("Перевірка...")
+    val effectiveToken = token.ifBlank { "change-me" }
+    runCatching {
+        val api = ApiFactory.create(baseUrl, effectiveToken)
+        api.auth(AuthRequest(effectiveToken))
+    }.onSuccess { response ->
+        if (response.isSuccessful) {
+            settingsRepository.saveSettings(serverIp, effectiveToken)
+            onContinue()
+            setStatus("Підключення успішне")
+        } else {
+            setStatus("Помилка: ${response.code()}")
+        }
+    }.onFailure { error ->
+        setStatus("Помилка: ${error.localizedMessage}")
+    }
 }
