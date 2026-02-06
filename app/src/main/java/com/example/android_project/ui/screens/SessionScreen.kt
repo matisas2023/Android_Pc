@@ -104,8 +104,8 @@ fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                     }.onSuccess { response ->
                                         if (response.isSuccessful) {
                                             val body = response.body()
-                                            sessionId = body?.session_id.orEmpty()
-                                            expiresAt = body?.expires_at.orEmpty()
+                                            sessionId = body?.sessionId.orEmpty()
+                                            expiresAt = body?.expiresAt.orEmpty()
                                             statusMessage = "Сесію створено"
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
@@ -135,7 +135,7 @@ fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                     runCatching { api.sessionHeartbeat(SessionHeartbeatRequest(sessionId)) }
                                         .onSuccess { response ->
                                             if (response.isSuccessful) {
-                                                expiresAt = response.body()?.expires_at.orEmpty()
+                                                expiresAt = response.body()?.expiresAt.orEmpty()
                                                 statusMessage = "Сесію продовжено"
                                             } else {
                                                 statusMessage = "Помилка: ${response.code()}"

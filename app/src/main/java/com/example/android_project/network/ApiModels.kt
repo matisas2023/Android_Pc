@@ -1,5 +1,7 @@
 package com.example.android_project.network
 
+import com.squareup.moshi.Json
+
 data class AuthRequest(val token: String)
 
 data class MouseMoveRequest(
@@ -39,26 +41,34 @@ data class SystemLaunchRequest(
 )
 
 data class SessionStartRequest(
-    val client_name: String? = null,
-    val timeout_seconds: Int? = null,
+    @Json(name = "clientName")
+    val clientName: String? = null,
+    @Json(name = "timeoutSeconds")
+    val timeoutSeconds: Int? = null,
 )
 
 data class SessionHeartbeatRequest(
-    val session_id: String,
+    @Json(name = "sessionId")
+    val sessionId: String,
 )
 
 data class SessionEndRequest(
-    val session_id: String,
+    @Json(name = "sessionId")
+    val sessionId: String,
 )
 
 data class SessionStartResponse(
-    val session_id: String,
-    val expires_at: String,
+    @Json(name = "sessionId")
+    val sessionId: String,
+    @Json(name = "expiresAt")
+    val expiresAt: String,
 )
 
 data class SessionStatusResponse(
-    val session_id: String,
-    val expires_at: String,
+    @Json(name = "sessionId")
+    val sessionId: String,
+    @Json(name = "expiresAt")
+    val expiresAt: String,
 )
 
 data class SystemPowerRequest(
@@ -67,23 +77,28 @@ data class SystemPowerRequest(
 
 data class ScreenRecordStartRequest(
     val fps: Int = 10,
-    val duration_seconds: Int? = null,
+    @Json(name = "durationSeconds")
+    val durationSeconds: Int? = null,
 )
 
 data class ScreenRecordStartResponse(
     val status: String,
-    val recording_id: String,
+    @Json(name = "recordingId")
+    val recordingId: String,
 )
 
 data class ScreenRecordStopResponse(
     val status: String,
-    val recording_id: String,
+    @Json(name = "recordingId")
+    val recordingId: String,
 )
 
 data class RecordingInfo(
-    val started_at: String,
+    @Json(name = "startedAt")
+    val startedAt: String,
     val fps: Int,
-    val duration_seconds: Int?,
+    @Json(name = "durationSeconds")
+    val durationSeconds: Int?,
     val completed: Boolean,
     val file: String,
 )
@@ -93,7 +108,8 @@ data class ScreenRecordingsResponse(
 )
 
 data class StatusResponse(
-    val cpu_percent: Float,
+    @Json(name = "cpuPercent")
+    val cpuPercent: Float,
     val memory: MemoryStats,
 )
 
