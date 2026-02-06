@@ -283,6 +283,7 @@ static class AppConstants
     public const int ServerPort = 8000;
     public const string StreamBoundary = "frame";
     public const int SessionSweepIntervalSeconds = 30;
+    public const string CloudflaredBaseUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download";
 }
 
 record AuthRequest(string Token);
@@ -554,10 +555,10 @@ sealed class SshTunnelService(
 
             try
             {
-                var sshPath = ResolveSshPath();
-                if (sshPath == null)
+                var cloudflaredPath = await EnsureCloudflaredAsync(stoppingToken);
+                if (cloudflaredPath == null)
                 {
-                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "SSH client not found."));
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Cloudflared download failed."));
                     await Task.Delay(RetryDelay, stoppingToken);
                     continue;
                 }
