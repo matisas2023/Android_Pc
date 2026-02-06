@@ -6,6 +6,7 @@ import org.json.JSONObject
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
+import java.net.NetworkInterface
 
 data class DiscoveredServer(
     val host: String,
@@ -26,13 +27,16 @@ object ServerDiscovery {
             socket.soTimeout = timeoutMs
 
             val data = discoveryMessage.toByteArray(Charsets.UTF_8)
-            val packet = DatagramPacket(
-                data,
-                data.size,
-                InetAddress.getByName("255.255.255.255"),
-                discoveryPort,
-            )
-            socket.send(packet)
+            val broadcastTargets = buildBroadcastTargets()
+            for (target in broadcastTargets) {
+                val packet = DatagramPacket(
+                    data,
+                    data.size,
+                    target,
+                    discoveryPort,
+                )
+                socket.send(packet)
+            }
 
             val buffer = ByteArray(1024)
             val response = DatagramPacket(buffer, buffer.size)
@@ -44,8 +48,17 @@ object ServerDiscovery {
             val token = payload?.optString("token", null)
             val tunnelUrl = payload?.optString("tunnelUrl", null)?.takeIf { it.isNotBlank() }
             val externalUrl = payload?.optString("externalUrl", null)?.takeIf { it.isNotBlank() }
+            val payloadHost = payload?.optJSONArray("ips")
+                ?.optString(0)
+                ?.takeIf { it.isNotBlank() }
+            val responseAddress = response.address
+            val host = when {
+                responseAddress == null -> payloadHost
+                responseAddress.isAnyLocalAddress || responseAddress.isLoopbackAddress -> payloadHost
+                else -> responseAddress.hostAddress
+            } ?: responseAddress?.hostAddress ?: payloadHost ?: return@withContext null
             DiscoveredServer(
-                host = response.address.hostAddress,
+                host = host,
                 port = port,
                 token = token,
                 tunnelUrl = tunnelUrl,
@@ -56,5 +69,27 @@ object ServerDiscovery {
         } finally {
             socket.close()
         }
+    }
+
+    private fun buildBroadcastTargets(): List<InetAddress> {
+        val targets = mutableSetOf<InetAddress>()
+        runCatching { targets.add(InetAddress.getByName("255.255.255.255")) }
+
+        val interfaces = runCatching { NetworkInterface.getNetworkInterfaces() }.getOrNull()
+        if (interfaces != null) {
+            for (networkInterface in interfaces) {
+                if (!networkInterface.isUp || networkInterface.isLoopback) {
+                    continue
+                }
+                for (address in networkInterface.interfaceAddresses) {
+                    val broadcast = address.broadcast
+                    if (broadcast != null) {
+                        targets.add(broadcast)
+                    }
+                }
+            }
+        }
+
+        return targets.toList()
     }
 }
