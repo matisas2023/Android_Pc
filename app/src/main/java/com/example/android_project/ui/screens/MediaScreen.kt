@@ -227,11 +227,11 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                     statusMessage = "Старт запису..."
                                     runCatching {
                                         api.screenRecordStart(
-                                            ScreenRecordStartRequest(fps = fpsValue, duration_seconds = durationValue),
+                                            ScreenRecordStartRequest(fps = fpsValue, durationSeconds = durationValue),
                                         )
                                     }.onSuccess { response ->
                                         if (response.isSuccessful) {
-                                            recordingId = response.body()?.recording_id.orEmpty()
+                                            recordingId = response.body()?.recordingId.orEmpty()
                                             statusMessage = "Запис запущено"
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
@@ -361,6 +361,7 @@ private fun MjpegStreamView(
     token: String,
     modifier: Modifier = Modifier,
 ) {
+    val effectiveToken = token.ifBlank { "change-me" }
     AndroidView(
         factory = { context ->
             WebView(context).apply {
@@ -371,7 +372,13 @@ private fun MjpegStreamView(
             }
         },
         update = { webView ->
-            webView.loadUrl(url, mapOf("X-API-Token" to token))
+            webView.loadUrl(
+                url,
+                mapOf(
+                    "X-API-Token" to effectiveToken,
+                    "Authorization" to "Bearer $effectiveToken",
+                ),
+            )
         },
         modifier = modifier,
     )

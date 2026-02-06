@@ -10,10 +10,12 @@ import retrofit2.converter.moshi.MoshiConverterFactory
 
 object ApiFactory {
     fun create(baseUrl: String, token: String): ApiService {
+        val effectiveToken = token.ifBlank { "change-me" }
         val authInterceptor = Interceptor { chain ->
             val request = chain.request()
                 .newBuilder()
-                .addHeader("X-API-Token", token)
+                .addHeader("X-API-Token", effectiveToken)
+                .addHeader("Authorization", "Bearer $effectiveToken")
                 .build()
             chain.proceed(request)
         }
@@ -34,7 +36,7 @@ object ApiFactory {
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(client)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .addConverterFactory(MoshiConverterFactory.create(moshi).asLenient())
             .build()
 
         return retrofit.create(ApiService::class.java)
