@@ -36,12 +36,15 @@ dotnet run --project PCRemoteServer.csproj
 - автознайдення в Android (в UDP відповіді `tunnelUrl`),
 - або `GET /tunnel/status` (повертає `url`, `status`).
 
-<<<<<<< codex/integrate-vpn-tunnel-into-app-and-server-7jmgfr
 > Потрібен доступ до інтернету та DNS; якщо тунель тимчасово не створюється, сервіс повторюватиме спроби.
-
-=======
->>>>>>> master
+> Якщо у логах є `lookup api.trycloudflare.com: no such host`, перевірте DNS/інтернет або вимкніть тунель.
 Щоб вимкнути вбудований тунель, задайте змінну середовища `PC_REMOTE_TUNNEL_ENABLE=0`.
+
+## Автоматичний зовнішній доступ через UPnP
+Якщо роутер підтримує UPnP, сервер спробує **автоматично відкрити порт 8000** і сформувати зовнішню адресу.
+Це працює без додаткових налаштувань (за умови, що UPnP увімкнений на роутері).
+
+Щоб вимкнути UPnP, задайте змінну середовища `PC_REMOTE_UPNP_ENABLE=0`.
 
 ## Рекомендований VPN/тунель (CGNAT)
 Якщо потрібен класичний VPN, оптимальний варіант — **Tailscale**: працює через CGNAT, має стабільне з'єднання, мінімум налаштувань та безкоштовний план для персонального використання.
@@ -56,7 +59,7 @@ dotnet run --project PCRemoteServer.csproj
 ## Автовиявлення (Android)
 Сервер слухає UDP порт `9999` і відповідає на повідомлення `PC_REMOTE_DISCOVERY` JSON-ом:
 ```json
-{"port":8000,"token":"<token>","ips":["192.168.1.10"],"tunnelUrl":"https://example.trycloudflare.com"}
+{"port":8000,"token":"<token>","ips":["192.168.1.10"],"tunnelUrl":"https://example.trycloudflare.com","externalUrl":"http://203.0.113.10:8000"}
 ```
 
 ## Авторизація
