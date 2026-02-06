@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Management;
+using System.Linq;
 using Microsoft.AspNetCore.Http.Json;
 using System.Text.RegularExpressions;
 using Open.Nat;
@@ -761,9 +762,10 @@ sealed class UpnpPortMappingService(
     UpnpState upnpState) : BackgroundService
 {
     private const string MappingDescription = "PC Remote Server";
+    private const string ProtocolTcp = "TCP";
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan RefreshDelay = TimeSpan.FromMinutes(10);
-    private Mapping? _mapping;
+    private int? _mappedPort;
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -773,34 +775,41 @@ sealed class UpnpPortMappingService(
             return;
         }
 
-        var discoverer = new NatDiscoverer();
-
         while (!stoppingToken.IsCancellationRequested)
         {
             try
             {
                 upnpState.Update(new UpnpSnapshot(null, null, "starting", DateTimeOffset.UtcNow, null));
 
-                using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
-                discoveryCts.CancelAfter(TimeSpan.FromSeconds(5));
-                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts);
+                var mappingCollection = TryGetMappingCollection();
+                if (mappingCollection == null)
+                {
+                    upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "UPnP not available."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
 
-                var externalIp = await device.GetExternalIPAsync();
-                _mapping = new Mapping(Protocol.Tcp, AppConstants.ServerPort, AppConstants.ServerPort, MappingDescription);
-                await device.CreatePortMapAsync(_mapping);
+                var localIp = NetworkHelper.GetLocalIps().FirstOrDefault();
+                if (string.IsNullOrWhiteSpace(localIp))
+                {
+                    upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "No local IP found."));
+                    await Task.Delay(RetryDelay, stoppingToken);
+                    continue;
+                }
 
-                var externalUrl = $"http://{externalIp}:{AppConstants.ServerPort}";
-                upnpState.Update(new UpnpSnapshot(externalIp.ToString(), externalUrl, "ready", DateTimeOffset.UtcNow, null));
+                RemoveMapping(mappingCollection, AppConstants.ServerPort);
+                var mapping = mappingCollection.Add(AppConstants.ServerPort, ProtocolTcp, AppConstants.ServerPort, localIp, true, MappingDescription);
+                _mappedPort = AppConstants.ServerPort;
+
+                var externalIp = mapping?.ExternalIPAddress as string;
+                var externalUrl = externalIp == null ? null : $"http://{externalIp}:{AppConstants.ServerPort}";
+                upnpState.Update(new UpnpSnapshot(externalIp, externalUrl, "ready", DateTimeOffset.UtcNow, null));
 
                 await Task.Delay(RefreshDelay, stoppingToken);
             }
             catch (TaskCanceledException)
             {
                 break;
-            }
-            catch (NatDeviceNotFoundException)
-            {
-                upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "UPnP router not found."));
             }
             catch (Exception ex)
             {
@@ -823,12 +832,13 @@ sealed class UpnpPortMappingService(
     {
         try
         {
-            if (_mapping != null)
+            if (_mappedPort.HasValue)
             {
-                var discoverer = new NatDiscoverer();
-                using var discoveryCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts);
-                await device.DeletePortMapAsync(_mapping);
+                var mappingCollection = TryGetMappingCollection();
+                if (mappingCollection != null)
+                {
+                    RemoveMapping(mappingCollection, _mappedPort.Value);
+                }
             }
         }
         catch (Exception ex)
@@ -837,6 +847,30 @@ sealed class UpnpPortMappingService(
         }
 
         await base.StopAsync(cancellationToken);
+    }
+
+    private static dynamic? TryGetMappingCollection()
+    {
+        var upnpType = Type.GetTypeFromProgID("HNetCfg.NATUPnP");
+        if (upnpType == null)
+        {
+            return null;
+        }
+
+        dynamic upnp = Activator.CreateInstance(upnpType);
+        return upnp?.StaticPortMappingCollection;
+    }
+
+    private static void RemoveMapping(dynamic mappingCollection, int port)
+    {
+        try
+        {
+            mappingCollection.Remove(port, ProtocolTcp);
+        }
+        catch
+        {
+            // Ignore missing mapping.
+        }
     }
 
     private static bool IsUpnpEnabled()
