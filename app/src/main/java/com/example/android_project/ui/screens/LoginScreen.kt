@@ -44,7 +44,7 @@ fun LoginScreen(
             statusMessage = "Пошук сервера..."
             val discovered = ServerDiscovery.discover()
             if (discovered != null) {
-                serverIp = discovered.tunnelUrl ?: "${discovered.host}:${discovered.port}"
+                serverIp = resolveServerAddress(discovered)
                 token = discovered.token.orEmpty().ifBlank { "change-me" }
                 settingsRepository.saveSettings(serverIp, token)
                 statusMessage = "Підключення знайдено"
@@ -122,7 +122,7 @@ fun LoginScreen(
                         statusMessage = "Сервер не знайдено"
                         return@launch
                     }
-                    serverIp = discovered.tunnelUrl ?: "${discovered.host}:${discovered.port}"
+                    serverIp = resolveServerAddress(discovered)
                     token = discovered.token.orEmpty()
                     settingsRepository.saveSettings(serverIp, token)
                     statusMessage = "Перевірка..."
@@ -169,4 +169,10 @@ fun normalizeBaseUrl(raw: String): String? {
         "http://$trimmed"
     }
     return if (withScheme.endsWith("/")) withScheme else "$withScheme/"
+}
+
+private fun resolveServerAddress(discovered: com.example.android_project.network.DiscoveredServer): String {
+    return discovered.tunnelUrl
+        ?: discovered.externalUrl
+        ?: "${discovered.host}:${discovered.port}"
 }

@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using System.Management;
 using Microsoft.AspNetCore.Http.Json;
 using System.Text.RegularExpressions;
+using Open.Nat;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -23,10 +24,12 @@ builder.Services.AddSingleton<SessionStore>();
 builder.Services.AddSingleton<RecordingStore>();
 builder.Services.AddSingleton<MetricsStore>();
 builder.Services.AddSingleton<TunnelState>();
+builder.Services.AddSingleton<UpnpState>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
 builder.Services.AddHostedService<MetricsSamplingService>();
-builder.Services.AddHostedService<SshTunnelService>();
+builder.Services.AddHostedService<CloudflareTunnelService>();
+builder.Services.AddHostedService<UpnpPortMappingService>();
 
 var app = builder.Build();
 
@@ -254,6 +257,10 @@ app.MapGet("/tunnel/status", (TunnelState tunnelState) =>
 {
     return Results.Ok(tunnelState.GetSnapshot());
 });
+app.MapGet("/upnp/status", (UpnpState upnpState) =>
+{
+    return Results.Ok(upnpState.GetSnapshot());
+});
 
 app.Urls.Clear();
 var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
@@ -277,6 +284,7 @@ static class AppConstants
     public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
     public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
     public const string TunnelEnabledEnv = "PC_REMOTE_TUNNEL_ENABLE";
+    public const string UpnpEnabledEnv = "PC_REMOTE_UPNP_ENABLE";
     public const string DefaultApiToken = "change-me";
     public const int DiscoveryPort = 9999;
     public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
@@ -436,7 +444,10 @@ sealed class SessionSweepService(SessionStore sessions) : BackgroundService
     }
 }
 
-sealed class DiscoveryService(ILogger<DiscoveryService> logger, TunnelState tunnelState) : BackgroundService
+sealed class DiscoveryService(
+    ILogger<DiscoveryService> logger,
+    TunnelState tunnelState,
+    UpnpState upnpState) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -463,12 +474,14 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger, TunnelState tunn
             }
 
             var tunnelSnapshot = tunnelState.GetSnapshot();
+            var upnpSnapshot = upnpState.GetSnapshot();
             var payload = JsonSerializer.Serialize(new
             {
                 port = AppConstants.ServerPort,
                 token = TokenHelper.GetConfiguredToken(),
                 ips = NetworkHelper.GetLocalIps(),
                 tunnelUrl = tunnelSnapshot.Url,
+                externalUrl = upnpSnapshot.ExternalUrl,
             });
 
             var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
@@ -507,6 +520,35 @@ static class NetworkHelper
     }
 }
 
+sealed class UpnpState
+{
+    private readonly object _lock = new();
+    private UpnpSnapshot _snapshot = new(null, null, "disabled", null, null);
+
+    public void Update(UpnpSnapshot snapshot)
+    {
+        lock (_lock)
+        {
+            _snapshot = snapshot;
+        }
+    }
+
+    public UpnpSnapshot GetSnapshot()
+    {
+        lock (_lock)
+        {
+            return _snapshot;
+        }
+    }
+}
+
+record UpnpSnapshot(
+    string? ExternalIp,
+    string? ExternalUrl,
+    string Status,
+    DateTimeOffset? UpdatedAt,
+    string? Error);
+
 sealed class TunnelState
 {
     private readonly object _lock = new();
@@ -535,7 +577,7 @@ sealed class SshTunnelService(
     ILogger<SshTunnelService> logger,
     TunnelState tunnelState) : BackgroundService
 {
-    private const string UrlPattern = @"https://[-a-zA-Z0-9]+(\.lhrtunnel\.link|\.localhost\.run)";
+    private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.trycloudflare\.com";
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
     private Process? _process;
 
@@ -711,6 +753,103 @@ sealed class SshTunnelService(
         }
 
         tunnelState.Update(new TunnelSnapshot(url, "ready", startedAt, null));
+    }
+}
+
+sealed class UpnpPortMappingService(
+    ILogger<UpnpPortMappingService> logger,
+    UpnpState upnpState) : BackgroundService
+{
+    private const string MappingDescription = "PC Remote Server";
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan RefreshDelay = TimeSpan.FromMinutes(10);
+    private Mapping? _mapping;
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        if (!IsUpnpEnabled())
+        {
+            upnpState.Update(new UpnpSnapshot(null, null, "disabled", null, null));
+            return;
+        }
+
+        var discoverer = new NatDiscoverer();
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            try
+            {
+                upnpState.Update(new UpnpSnapshot(null, null, "starting", DateTimeOffset.UtcNow, null));
+
+                using var discoveryCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
+                discoveryCts.CancelAfter(TimeSpan.FromSeconds(5));
+                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts.Token);
+
+                var externalIp = await device.GetExternalIPAsync();
+                _mapping = new Mapping(Protocol.Tcp, AppConstants.ServerPort, AppConstants.ServerPort, MappingDescription);
+                await device.CreatePortMapAsync(_mapping);
+
+                var externalUrl = $"http://{externalIp}:{AppConstants.ServerPort}";
+                upnpState.Update(new UpnpSnapshot(externalIp.ToString(), externalUrl, "ready", DateTimeOffset.UtcNow, null));
+
+                await Task.Delay(RefreshDelay, stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+            catch (NatDeviceNotFoundException)
+            {
+                upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "UPnP router not found."));
+            }
+            catch (Exception ex)
+            {
+                upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, ex.Message));
+                logger.LogWarning(ex, "UPnP port mapping failed.");
+            }
+
+            try
+            {
+                await Task.Delay(RetryDelay, stoppingToken);
+            }
+            catch (TaskCanceledException)
+            {
+                break;
+            }
+        }
+    }
+
+    public override async Task StopAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_mapping != null)
+            {
+                var discoverer = new NatDiscoverer();
+                using var discoveryCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                var device = await discoverer.DiscoverDeviceAsync(PortMapper.Upnp, discoveryCts.Token);
+                await device.DeletePortMapAsync(_mapping);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to remove UPnP port mapping.");
+        }
+
+        await base.StopAsync(cancellationToken);
+    }
+
+    private static bool IsUpnpEnabled()
+    {
+        var value = Environment.GetEnvironmentVariable(AppConstants.UpnpEnabledEnv);
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return true;
+        }
+
+        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
+            && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
     }
 }
 
