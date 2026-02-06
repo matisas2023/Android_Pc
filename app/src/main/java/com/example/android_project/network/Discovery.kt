@@ -12,6 +12,7 @@ data class DiscoveredServer(
     val port: Int,
     val token: String?,
     val tunnelUrl: String?,
+    val externalUrl: String?,
 )
 
 object ServerDiscovery {
@@ -42,11 +43,13 @@ object ServerDiscovery {
             val port = payload?.optInt("port", 8000) ?: 8000
             val token = payload?.optString("token", null)
             val tunnelUrl = payload?.optString("tunnelUrl", null)?.takeIf { it.isNotBlank() }
+            val externalUrl = payload?.optString("externalUrl", null)?.takeIf { it.isNotBlank() }
             DiscoveredServer(
                 host = response.address.hostAddress,
                 port = port,
                 token = token,
                 tunnelUrl = tunnelUrl,
+                externalUrl = externalUrl,
             )
         } catch (error: Exception) {
             null
