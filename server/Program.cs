@@ -29,7 +29,7 @@ builder.Services.AddSingleton<UpnpState>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
 builder.Services.AddHostedService<MetricsSamplingService>();
-builder.Services.AddHostedService<CloudflareTunnelService>();
+builder.Services.AddHostedService<SshTunnelService>();
 builder.Services.AddHostedService<UpnpPortMappingService>();
 
 var app = builder.Build();
@@ -292,7 +292,6 @@ static class AppConstants
     public const int ServerPort = 8000;
     public const string StreamBoundary = "frame";
     public const int SessionSweepIntervalSeconds = 30;
-    public const string CloudflaredBaseUrl = "https://github.com/cloudflare/cloudflared/releases/latest/download";
 }
 
 record AuthRequest(string Token);
@@ -578,7 +577,7 @@ sealed class SshTunnelService(
     ILogger<SshTunnelService> logger,
     TunnelState tunnelState) : BackgroundService
 {
-    private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.trycloudflare\.com";
+    private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.lhr\.life|https://[-a-zA-Z0-9]+\.localhost\.run";
     private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
     private Process? _process;
 
@@ -598,10 +597,10 @@ sealed class SshTunnelService(
 
             try
             {
-                var cloudflaredPath = await EnsureCloudflaredAsync(stoppingToken);
-                if (cloudflaredPath == null)
+                var sshPath = ResolveSshPath();
+                if (string.IsNullOrWhiteSpace(sshPath))
                 {
-                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Cloudflared download failed."));
+                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "SSH client not found."));
                     await Task.Delay(RetryDelay, stoppingToken);
                     continue;
                 }
