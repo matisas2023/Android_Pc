@@ -14,6 +14,7 @@ object ApiFactory {
             val request = chain.request()
                 .newBuilder()
                 .addHeader("X-API-Token", token)
+                .addHeader("Authorization", "Bearer $token")
                 .build()
             chain.proceed(request)
         }
@@ -34,7 +35,7 @@ object ApiFactory {
         val retrofit = Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(client)
-            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .addConverterFactory(MoshiConverterFactory.create(moshi).asLenient())
             .build()
 
         return retrofit.create(ApiService::class.java)
