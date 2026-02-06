@@ -9,25 +9,25 @@ import retrofit2.http.Path
 
 interface ApiService {
     @POST("auth")
-    suspend fun auth(@Body request: AuthRequest): Response<Map<String, String>>
+    suspend fun auth(@Body request: AuthRequest): Response<ResponseBody>
 
     @POST("mouse/move")
-    suspend fun mouseMove(@Body request: MouseMoveRequest): Response<Map<String, String>>
+    suspend fun mouseMove(@Body request: MouseMoveRequest): Response<ResponseBody>
 
     @POST("mouse/click")
-    suspend fun mouseClick(@Body request: MouseClickRequest): Response<Map<String, String>>
+    suspend fun mouseClick(@Body request: MouseClickRequest): Response<ResponseBody>
 
     @POST("keyboard/press")
-    suspend fun keyboardPress(@Body request: KeyboardPressRequest): Response<Map<String, String>>
+    suspend fun keyboardPress(@Body request: KeyboardPressRequest): Response<ResponseBody>
 
     @POST("system/volume")
-    suspend fun systemVolume(@Body request: SystemVolumeRequest): Response<Map<String, String>>
+    suspend fun systemVolume(@Body request: SystemVolumeRequest): Response<ResponseBody>
 
     @POST("system/volume/set")
-    suspend fun systemVolumeSet(@Body request: SystemVolumeSetRequest): Response<Map<String, String>>
+    suspend fun systemVolumeSet(@Body request: SystemVolumeSetRequest): Response<ResponseBody>
 
     @POST("system/launch")
-    suspend fun systemLaunch(@Body request: SystemLaunchRequest): Response<Map<String, String>>
+    suspend fun systemLaunch(@Body request: SystemLaunchRequest): Response<ResponseBody>
 
     @GET("system/status")
     suspend fun systemStatus(): Response<StatusResponse>
@@ -45,16 +45,16 @@ interface ApiService {
     suspend fun sessionHeartbeat(@Body request: SessionHeartbeatRequest): Response<SessionStatusResponse>
 
     @POST("session/end")
-    suspend fun sessionEnd(@Body request: SessionEndRequest): Response<Map<String, String>>
+    suspend fun sessionEnd(@Body request: SessionEndRequest): Response<ResponseBody>
 
     @POST("system/power")
-    suspend fun systemPower(@Body request: SystemPowerRequest): Response<Map<String, String>>
+    suspend fun systemPower(@Body request: SystemPowerRequest): Response<ResponseBody>
 
     @POST("screen/record/start")
     suspend fun screenRecordStart(@Body request: ScreenRecordStartRequest): Response<ScreenRecordStartResponse>
 
     @POST("screen/record/stop/{recordingId}")
-    suspend fun screenRecordStop(@Path("recordingId") recordingId: String): Response<ScreenRecordStopResponse>
+    suspend fun screenRecordStop(@Path("recordingId") recordingId: String): Response<ResponseBody>
 
     @GET("screen/recordings")
     suspend fun screenRecordings(): Response<ScreenRecordingsResponse>
