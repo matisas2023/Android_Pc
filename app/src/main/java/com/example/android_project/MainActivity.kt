@@ -18,6 +18,7 @@ import com.example.android_project.ui.screens.LoginScreen
 import com.example.android_project.ui.screens.MainMenuScreen
 import com.example.android_project.ui.screens.MediaScreen
 import com.example.android_project.ui.screens.MouseScreen
+import com.example.android_project.ui.screens.PriorityControlScreen
 import com.example.android_project.ui.screens.ScreenshotScreen
 import com.example.android_project.ui.screens.SessionScreen
 import com.example.android_project.ui.screens.SystemScreen
@@ -48,7 +49,7 @@ private fun AppNavHost(
         composable(Routes.Login.route) {
             LoginScreen(
                 settingsRepository = settingsRepository,
-                onContinue = { navController.navigate(Routes.MainMenu.route) },
+                onContinue = { navController.navigate(Routes.Priority.route) },
             )
         }
         composable(Routes.MainMenu.route) {
@@ -75,6 +76,9 @@ private fun AppNavHost(
         composable(Routes.Media.route) {
             MediaScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
         }
+        composable(Routes.Priority.route) {
+            PriorityControlScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
+        }
     }
 }
 
@@ -87,4 +91,5 @@ sealed class Routes(val route: String) {
     data object Screenshot : Routes("screenshot")
     data object Session : Routes("session")
     data object Media : Routes("media")
+    data object Priority : Routes("priority")
 }

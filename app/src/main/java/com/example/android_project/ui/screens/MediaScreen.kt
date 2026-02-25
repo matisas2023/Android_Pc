@@ -1,6 +1,9 @@
 package com.example.android_project.ui.screens
 
 import android.graphics.BitmapFactory
+import android.webkit.WebResourceError
+import android.webkit.WebResourceRequest
+import android.webkit.WebViewClient
 import android.webkit.WebView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
@@ -143,6 +146,7 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                         MjpegStreamView(
                             url = streamUrl,
                             token = token,
+                            onError = { message -> statusMessage = message },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .aspectRatio(16f / 9f),
@@ -164,13 +168,15 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                 runCatching { api.cameraPhoto() }
                                     .onSuccess { response ->
                                         if (response.isSuccessful) {
-                                            val bytes = response.body()?.bytes() ?: ByteArray(0)
-                                            val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                            cameraImage = bitmap?.asImageBitmap()
-                                            statusMessage = if (bitmap != null) {
-                                                "Фото отримано"
+                                            val body = response.body()
+                                            val bytes = body?.bytes() ?: ByteArray(0)
+                                            val contentType = body?.contentType()?.toString().orEmpty()
+                                            val bitmap = decodeBitmapSafely(bytes)
+                                            if (bitmap != null) {
+                                                cameraImage = bitmap.asImageBitmap()
+                                                statusMessage = "Фото отримано"
                                             } else {
-                                                "Не вдалося декодувати"
+                                                statusMessage = "Помилка декодування: контент не схожий на зображення (${contentType.ifBlank { "unknown" }})"
                                             }
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
@@ -231,8 +237,13 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                         )
                                     }.onSuccess { response ->
                                         if (response.isSuccessful) {
-                                            recordingId = response.body()?.recordingId.orEmpty()
-                                            statusMessage = "Запис запущено"
+                                            val body = response.body()
+                                            recordingId = body?.recordingId ?: body?.recordingIdSnake.orEmpty()
+                                            statusMessage = if (recordingId.isNotBlank()) {
+                                                "Запис запущено"
+                                            } else {
+                                                "Сервер не повернув recording_id"
+                                            }
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
                                         }
@@ -340,6 +351,7 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                 MjpegStreamView(
                     url = streamUrl,
                     token = token,
+                    onError = { message -> statusMessage = message },
                     modifier = Modifier.fillMaxSize(),
                 )
                 FilledTonalButton(
@@ -359,6 +371,7 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
 private fun MjpegStreamView(
     url: String,
     token: String,
+    onError: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val effectiveToken = token.ifBlank { "change-me" }
@@ -369,6 +382,18 @@ private fun MjpegStreamView(
                 settings.useWideViewPort = true
                 settings.builtInZoomControls = true
                 settings.displayZoomControls = false
+                settings.javaScriptEnabled = true
+                settings.domStorageEnabled = true
+                webViewClient = object : WebViewClient() {
+                    override fun onReceivedError(
+                        view: WebView?,
+                        request: WebResourceRequest?,
+                        error: WebResourceError?,
+                    ) {
+                        val description = error?.description?.toString()?.takeIf { it.isNotBlank() } ?: "невідома помилка"
+                        onError("Помилка стріму: $description")
+                    }
+                }
             }
         },
         update = { webView ->
@@ -382,6 +407,11 @@ private fun MjpegStreamView(
         },
         modifier = modifier,
     )
+}
+
+private fun decodeBitmapSafely(bytes: ByteArray): android.graphics.Bitmap? {
+    if (bytes.isEmpty()) return null
+    return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
 }
 
 private enum class StreamType {
