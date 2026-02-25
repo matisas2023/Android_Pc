@@ -1,1712 +1,558 @@
 using System.Collections.Concurrent;
-using System.ComponentModel;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
-using System.Text.Json;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json.Serialization;
-using System.Management;
-using System.Linq;
-using Microsoft.AspNetCore.Http.Json;
-using System.Text.RegularExpressions;
-using Open.Nat;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Serilog;
+using System.Windows.Forms;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.Configure<JsonOptions>(options =>
+builder.Host.UseSerilog((ctx, cfg) => cfg
+    .MinimumLevel.Information()
+    .WriteTo.Console()
+    .WriteTo.File("logs/audit-.log", rollingInterval: RollingInterval.Day));
+
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
+builder.Services.ConfigureHttpJsonOptions(o =>
 {
-    options.SerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
-    options.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
+    o.SerializerOptions.DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull;
 });
 
-builder.Services.AddSingleton<SessionStore>();
-builder.Services.AddSingleton<RecordingStore>();
-builder.Services.AddSingleton<MetricsStore>();
-builder.Services.AddSingleton<TunnelState>();
-builder.Services.AddSingleton<UpnpState>();
-builder.Services.AddHostedService<DiscoveryService>();
-builder.Services.AddHostedService<SessionSweepService>();
-builder.Services.AddHostedService<MetricsSamplingService>();
-builder.Services.AddHostedService<SshTunnelService>();
-builder.Services.AddHostedService<UpnpPortMappingService>();
+builder.Services.AddSingleton<SecurityState>();
+builder.Services.AddSingleton<ReplayProtectionService>();
+builder.Services.AddSingleton<IStatusService, StatusService>();
+builder.Services.AddSingleton<ISystemService, SystemService>();
+builder.Services.AddSingleton<IInputService, InputService>();
+builder.Services.AddSingleton<IScreenService, ScreenService>();
+builder.Services.AddSingleton<IMediaService, MediaService>();
+builder.Services.AddSingleton<IProcessService, ProcessService>();
+builder.Services.AddSingleton<IFileService, FileService>();
+builder.Services.AddSingleton<IClipboardService, ClipboardService>();
+builder.Services.AddHostedService<PairingCodeRotationService>();
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.AddFixedWindowLimiter("default", lim =>
+    {
+        lim.Window = TimeSpan.FromSeconds(10);
+        lim.PermitLimit = 60;
+        lim.QueueLimit = 0;
+    });
+});
 
 var app = builder.Build();
 
-app.Use(async (context, next) =>
+app.UseRateLimiter();
+app.UseSwagger();
+app.UseSwaggerUI();
+
+app.Use(async (ctx, next) =>
 {
-    if (context.Request.Path.Equals("/auth", StringComparison.OrdinalIgnoreCase))
+    if (ctx.Request.Path.StartsWithSegments("/swagger")
+        || ctx.Request.Path.StartsWithSegments("/openapi")
+        || ctx.Request.Path == "/"
+        || ctx.Request.Path == "/api/v1/pairing/code"
+        || ctx.Request.Path == "/api/v1/pairing/pair"
+        || ctx.Request.Path == "/health")
     {
         await next();
         return;
     }
 
-    var token = TokenHelper.ExtractToken(context.Request);
-    var expected = TokenHelper.GetConfiguredToken();
-    if (string.IsNullOrWhiteSpace(token) || token != expected)
+    var sec = ctx.RequestServices.GetRequiredService<SecurityState>();
+    var auth = ctx.Request.Headers.Authorization.ToString();
+    if (!auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
     {
-        context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        await context.Response.WriteAsJsonAsync(new { detail = "Invalid or missing API token." });
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { detail = "Missing bearer token" });
         return;
+    }
+
+    var token = auth.Substring("Bearer ".Length).Trim();
+    if (!sec.IsValidToken(token))
+    {
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        await ctx.Response.WriteAsJsonAsync(new { detail = "Invalid token" });
+        return;
+    }
+
+    if (ctx.Request.Method is "POST" or "PUT" or "DELETE")
+    {
+        var replay = ctx.RequestServices.GetRequiredService<ReplayProtectionService>();
+        var ts = ctx.Request.Headers["X-Timestamp"].ToString();
+        var nonce = ctx.Request.Headers["X-Nonce"].ToString();
+        if (!replay.Validate(token, ts, nonce, out var reason))
+        {
+            ctx.Response.StatusCode = StatusCodes.Status400BadRequest;
+            await ctx.Response.WriteAsJsonAsync(new { detail = reason });
+            return;
+        }
     }
 
     await next();
 });
 
-app.MapPost("/auth", (AuthRequest request) =>
+app.MapGet("/", () => Results.Ok(new { name = "RemoteControl.Server", version = "v2" }));
+app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
+
+app.MapGet("/api/v1/pairing/code", ([FromServices] SecurityState sec, HttpContext ctx) =>
 {
-    var isValid = request.Token == TokenHelper.GetConfiguredToken();
-    if (!isValid)
+    if (!IsLocalRequest(ctx.Connection.RemoteIpAddress))
     {
-        return Results.Json(new { detail = "Invalid token" }, statusCode: StatusCodes.Status401Unauthorized);
+        return Results.StatusCode(StatusCodes.Status403Forbidden);
     }
 
-    return Results.Ok(new { status = "ok" });
+    var code = sec.GetCurrentPairingCode();
+    return Results.Ok(new { code.Value, code.ExpiresAtUtc });
 });
 
-app.MapPost("/mouse/move", (MouseMoveRequest request) =>
+app.MapPost("/api/v1/pairing/pair", ([FromBody] PairingRequest req, [FromServices] SecurityState sec) =>
 {
-    if (request.Absolute)
+    if (!sec.TryPair(req.Code, req.ClientName ?? "android", out var token))
     {
-        InputController.MoveMouseAbsolute(request.X, request.Y, request.Duration);
-    }
-    else
-    {
-        InputController.MoveMouseRelative(request.X, request.Y, request.Duration);
+        return Results.Unauthorized();
     }
 
-    return Results.Ok(new { status = "ok" });
+    return Results.Ok(new PairingResponse(token!, DateTimeOffset.UtcNow.AddDays(30)));
 });
 
-app.MapPost("/mouse/click", (MouseClickRequest request) =>
+app.MapGet("/api/v1/status", ([FromServices] IStatusService status) => Results.Ok(status.GetStatus()))
+    .RequireRateLimiting("default");
+
+app.MapPost("/api/v1/system/power", ([FromBody] PowerRequest req, [FromServices] ISystemService system, HttpContext ctx) =>
 {
-    InputController.MouseClick(request);
-    return Results.Ok(new { status = "ok" });
+    var ok = system.Power(req.Action);
+    Audit(ctx, "system.power", req.Action, ok ? "ok" : "fail");
+    return ok ? Results.Ok(new { status = "ok" }) : Results.BadRequest(new { detail = "unsupported action" });
 });
 
-app.MapPost("/keyboard/press", (KeyboardPressRequest request) =>
+app.MapGet("/api/v1/screen/screenshot", ([FromServices] IScreenService screen) =>
 {
-    InputController.KeyboardPress(request);
-    return Results.Ok(new { status = "ok" });
-});
-
-app.MapPost("/system/volume", (SystemVolumeRequest request) =>
-{
-    InputController.AdjustVolume(request.Action, request.Steps);
-    return Results.Ok(new { status = "ok" });
-});
-
-app.MapPost("/system/launch", (SystemLaunchRequest request) =>
-{
-    try
-    {
-        var startInfo = new ProcessStartInfo(request.Command)
-        {
-            UseShellExecute = false,
-        };
-        if (request.Args is { Count: > 0 })
-        {
-            foreach (var arg in request.Args)
-            {
-                startInfo.ArgumentList.Add(arg);
-            }
-        }
-
-        Process.Start(startInfo);
-    }
-    catch (Exception ex) when (ex is Win32Exception or FileNotFoundException)
-    {
-        return Results.NotFound(new { detail = ex.Message });
-    }
-
-    return Results.Ok(new { status = "ok" });
-});
-
-app.MapGet("/system/status", () =>
-{
-    var cpu = SystemMetrics.GetCpuUsage();
-    var memory = SystemMetrics.GetMemoryStatus();
-
-    return Results.Ok(new
-    {
-        cpuPercent = cpu,
-        memory = new
-        {
-            total = memory.Total,
-            available = memory.Available,
-            used = memory.Used,
-            percent = memory.Percent,
-        },
-    });
-});
-
-app.MapGet("/system/metrics", (MetricsStore metrics) =>
-{
-    return Results.Ok(metrics.GetSnapshot());
-});
-
-app.MapGet("/screen/screenshot", () =>
-{
-    var bytes = ScreenCapture.CapturePng();
+    var bytes = screen.CapturePng();
     return Results.Bytes(bytes, "image/png");
 });
 
-app.MapPost("/session/start", (SessionStartRequest request, SessionStore sessions) =>
+app.MapGet("/api/v1/camera/photo", ([FromServices] IScreenService screen) =>
 {
-    var session = sessions.CreateSession(request);
-    return Results.Ok(session);
+    var bytes = screen.CaptureCameraJpeg();
+    return bytes == null ? Results.Problem("Camera not available", statusCode: 503) : Results.Bytes(bytes, "image/jpeg");
 });
 
-app.MapPost("/session/heartbeat", (SessionHeartbeatRequest request, SessionStore sessions) =>
+app.MapGet("/api/v1/processes", ([FromServices] IProcessService svc) => Results.Ok(svc.List()));
+app.MapPost("/api/v1/processes/{pid:int}/kill", (int pid, [FromQuery] bool confirm, [FromServices] IProcessService svc) =>
 {
-    var result = sessions.TouchSession(request.SessionId);
-    return result.Status switch
-    {
-        SessionTouchStatus.NotFound => Results.NotFound(new { detail = "Session not found." }),
-        SessionTouchStatus.Expired => Results.Json(new { detail = "Session expired." }, statusCode: StatusCodes.Status410Gone),
-        _ => Results.Ok(result.Response),
-    };
+    if (!confirm) return Results.BadRequest(new { detail = "confirm=true required" });
+    return svc.Kill(pid) ? Results.Ok(new { status = "ok" }) : Results.NotFound();
 });
 
-app.MapPost("/session/end", (SessionEndRequest request, SessionStore sessions) =>
+app.MapGet("/api/v1/files/list", ([FromQuery] string path, [FromServices] IFileService files) => Results.Ok(files.List(path)));
+app.MapPost("/api/v1/files/folder", ([FromBody] CreateFolderRequest req, [FromServices] IFileService files) => Results.Ok(files.CreateFolder(req.Path)));
+app.MapPost("/api/v1/files/rename", ([FromBody] RenameRequest req, [FromServices] IFileService files) => Results.Ok(files.Rename(req.Source, req.Target)));
+app.MapDelete("/api/v1/files", ([FromQuery] string path, [FromServices] IFileService files) => Results.Ok(files.Delete(path)));
+app.MapGet("/api/v1/files/download", ([FromQuery] string path) => Results.File(path, "application/octet-stream", Path.GetFileName(path)));
+app.MapPost("/api/v1/files/upload", async ([FromQuery] string targetDir, HttpRequest req, [FromServices] IFileService files) =>
 {
-    var removed = sessions.EndSession(request.SessionId);
-    return removed
-        ? Results.Ok(new { status = "ok" })
-        : Results.NotFound(new { detail = "Session not found." });
+    var form = await req.ReadFormAsync();
+    var file = form.Files.FirstOrDefault();
+    if (file == null) return Results.BadRequest(new { detail = "file missing" });
+    var saved = await files.Upload(targetDir, file);
+    return Results.Ok(new { saved });
 });
 
-app.MapGet("/session/status/{sessionId}", (string sessionId, SessionStore sessions) =>
+app.MapGet("/api/v1/clipboard", ([FromServices] IClipboardService cb) => Results.Ok(new { text = cb.ReadText() }));
+app.MapPost("/api/v1/clipboard", ([FromBody] ClipboardWriteRequest req, [FromServices] IClipboardService cb) =>
 {
-    var result = sessions.TouchSession(sessionId);
-    return result.Status switch
-    {
-        SessionTouchStatus.NotFound => Results.NotFound(new { detail = "Session not found." }),
-        SessionTouchStatus.Expired => Results.Json(new { detail = "Session expired." }, statusCode: StatusCodes.Status410Gone),
-        _ => Results.Ok(result.Response),
-    };
+    cb.WriteText(req.Text);
+    return Results.Ok(new { status = "ok" });
 });
 
-app.MapPost("/system/power", (SystemPowerRequest request) =>
+app.MapPost("/api/v1/media", ([FromBody] MediaRequest req, [FromServices] IMediaService media) =>
 {
-    var ok = SystemPower.Execute(request.Action);
-    return ok
-        ? Results.Ok(new { status = "ok", action = request.Action })
-        : Results.BadRequest(new { detail = "Unsupported action." });
+    var ok = media.Execute(req.Action);
+    return ok ? Results.Ok(new { status = "ok" }) : Results.BadRequest();
 });
 
-app.MapPost("/system/volume/set", (SystemVolumeSetRequest request) =>
-{
-    if (!OperatingSystem.IsWindows())
-    {
-        return Results.StatusCode(StatusCodes.Status501NotImplemented);
-    }
-
-    var level = Math.Clamp(request.Level, 0, 100);
-    AudioController.SetMasterVolume(level / 100f);
-    return Results.Ok(new { status = "ok", level });
-});
-
-app.MapGet("/screen/stream", async (HttpContext context, int fps = 5) =>
-{
-    context.Response.ContentType = $"multipart/x-mixed-replace; boundary={AppConstants.StreamBoundary}";
-
-    await foreach (var frame in ScreenCapture.StreamFrames(fps, context.RequestAborted))
-    {
-        if (context.RequestAborted.IsCancellationRequested)
-        {
-            break;
-        }
-
-        await context.Response.Body.WriteAsync(frame, context.RequestAborted);
-        await context.Response.Body.FlushAsync(context.RequestAborted);
-    }
-});
-
-app.MapGet("/camera/stream", () =>
-{
-    return Results.Problem("Camera streaming requires additional setup.", statusCode: StatusCodes.Status503ServiceUnavailable);
-});
-
-app.MapGet("/camera/photo", () =>
-{
-    return Results.Problem("Camera capture requires additional setup.", statusCode: StatusCodes.Status503ServiceUnavailable);
-});
-
-app.MapPost("/screen/record/start", (ScreenRecordStartRequest request, RecordingStore recordings) =>
-{
-    var recording = recordings.StartRecording(request);
-    return Results.Ok(new { status = "ok", recordingId = recording.Id });
-});
-
-app.MapPost("/screen/record/stop/{recordingId}", (string recordingId, RecordingStore recordings) =>
-{
-    var stopped = recordings.StopRecording(recordingId);
-    return stopped
-        ? Results.Ok(new { status = "ok", recordingId })
-        : Results.NotFound(new { detail = "Recording not found." });
-});
-
-app.MapGet("/screen/recordings", (RecordingStore recordings) =>
-{
-    return Results.Ok(new { recordings = recordings.GetStatus() });
-});
-
-app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
-app.MapGet("/tunnel/status", (TunnelState tunnelState) =>
-{
-    return Results.Ok(tunnelState.GetSnapshot());
-});
-app.MapGet("/upnp/status", (UpnpState upnpState) =>
-{
-    return Results.Ok(upnpState.GetSnapshot());
-});
-
-app.Urls.Clear();
-var configuredUrls = Environment.GetEnvironmentVariable(AppConstants.ServerUrlsEnv);
-if (!string.IsNullOrWhiteSpace(configuredUrls))
-{
-    foreach (var url in configuredUrls.Split(new[] { ';', ',' }, StringSplitOptions.RemoveEmptyEntries))
-    {
-        app.Urls.Add(url.Trim());
-    }
-}
-else
-{
-    app.Urls.Add($"http://0.0.0.0:{AppConstants.ServerPort}");
-    app.Urls.Add($"http://[::]:{AppConstants.ServerPort}");
-}
+app.MapPost("/api/v1/input/mouse/move", ([FromBody] MouseMoveRequest req, [FromServices] IInputService input) => { input.MoveMouse(req.Dx, req.Dy); return Results.Ok(); });
+app.MapPost("/api/v1/input/mouse/click", ([FromBody] MouseClickRequest req, [FromServices] IInputService input) => { input.Click(req.Button, req.Double); return Results.Ok(); });
+app.MapPost("/api/v1/input/mouse/scroll", ([FromBody] MouseScrollRequest req, [FromServices] IInputService input) => { input.Scroll(req.Delta); return Results.Ok(); });
+app.MapPost("/api/v1/input/keyboard/text", ([FromBody] KeyboardTextRequest req, [FromServices] IInputService input) => { input.TypeText(req.Text); return Results.Ok(); });
+app.MapPost("/api/v1/input/keyboard/hotkey", ([FromBody] HotkeyRequest req, [FromServices] IInputService input) => { input.Hotkey(req.Keys); return Results.Ok(); });
 
 app.Run();
 
-static class AppConstants
+static bool IsLocalRequest(IPAddress? ip)
 {
-    public const string ApiTokenEnv = "PC_REMOTE_API_TOKEN";
-    public const string ServerUrlsEnv = "PC_REMOTE_SERVER_URLS";
-    public const string TunnelEnabledEnv = "PC_REMOTE_TUNNEL_ENABLE";
-    public const string UpnpEnabledEnv = "PC_REMOTE_UPNP_ENABLE";
-    public const string DefaultApiToken = "change-me";
-    public const int DiscoveryPort = 9999;
-    public const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
-    public const int ServerPort = 8000;
-    public const string StreamBoundary = "frame";
-    public const int SessionSweepIntervalSeconds = 30;
+    if (ip == null) return false;
+    return IPAddress.IsLoopback(ip) || ip.ToString().StartsWith("192.168.") || ip.ToString().StartsWith("10.") || ip.ToString().StartsWith("172.");
 }
 
-record AuthRequest(string Token);
-record MouseMoveRequest(int X, int Y, double Duration = 0, bool Absolute = true);
-record MouseClickRequest(string Button = "left", int Clicks = 1, double Interval = 0, int? X = null, int? Y = null);
-record KeyboardPressRequest(string? Key = null, List<string>? Keys = null, int Presses = 1, double Interval = 0);
-record SystemVolumeRequest(string Action, int Steps = 1);
-record SystemVolumeSetRequest(int Level);
-record SystemLaunchRequest(string Command, List<string>? Args = null);
-record SessionStartRequest(string? ClientName = null, int TimeoutSeconds = 900);
-record SessionHeartbeatRequest(string SessionId);
-record SessionEndRequest(string SessionId);
-record SystemPowerRequest(string Action);
-record ScreenRecordStartRequest(int Fps = 10, int? DurationSeconds = null);
-
-static class TokenHelper
+static void Audit(HttpContext ctx, string command, string summary, string result)
 {
-    public static string GetConfiguredToken()
-    {
-        var token = Environment.GetEnvironmentVariable(AppConstants.ApiTokenEnv);
-        return string.IsNullOrWhiteSpace(token) ? AppConstants.DefaultApiToken : token;
-    }
-
-    public static string? ExtractToken(HttpRequest request)
-    {
-        if (request.Headers.TryGetValue("Authorization", out var authHeader))
-        {
-            var value = authHeader.ToString();
-            if (value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
-            {
-                return value.Substring("Bearer ".Length).Trim();
-            }
-        }
-
-        if (request.Headers.TryGetValue("X-API-Token", out var tokenHeader))
-        {
-            return tokenHeader.ToString();
-        }
-
-        return null;
-    }
+    Log.Information("audit command={Command} summary={Summary} result={Result} client={Client}", command, summary, result, ctx.Connection.RemoteIpAddress?.ToString());
 }
 
-sealed class SessionStore
-{
-    private readonly ConcurrentDictionary<string, SessionInfo> _sessions = new();
+public record PairingCode(string Value, DateTimeOffset ExpiresAtUtc);
+record PairingRequest(string Code, string? ClientName);
+record PairingResponse(string Token, DateTimeOffset ExpiresAtUtc);
+record PowerRequest(string Action);
+record ClipboardWriteRequest(string Text);
+record MediaRequest(string Action);
+record MouseMoveRequest(int Dx, int Dy);
+record MouseClickRequest(string Button = "left", bool Double = false);
+record MouseScrollRequest(int Delta);
+record KeyboardTextRequest(string Text);
+record HotkeyRequest(List<string> Keys);
+record CreateFolderRequest(string Path);
+record RenameRequest(string Source, string Target);
+record ProcessInfoDto(int Pid, string Name, long MemoryBytes);
+record FileEntryDto(string Name, string FullPath, bool IsDirectory, long Size);
 
-    public SessionResponse CreateSession(SessionStartRequest request)
-    {
-        var id = Guid.NewGuid().ToString();
-        var timeout = Math.Clamp(request.TimeoutSeconds, 30, 24 * 60 * 60);
-        var now = DateTimeOffset.UtcNow;
-        var info = new SessionInfo(id, request.ClientName ?? "unknown", now, now, timeout);
-        _sessions[id] = info;
-        return new SessionResponse(id, now.AddSeconds(timeout));
-    }
-
-    public SessionTouchResult TouchSession(string sessionId)
-    {
-        if (!_sessions.TryGetValue(sessionId, out var info))
-        {
-            return new SessionTouchResult(SessionTouchStatus.NotFound, null);
-        }
-
-        var now = DateTimeOffset.UtcNow;
-        if (now - info.LastSeen > TimeSpan.FromSeconds(info.TimeoutSeconds))
-        {
-            _sessions.TryRemove(sessionId, out _);
-            return new SessionTouchResult(SessionTouchStatus.Expired, null);
-        }
-
-        info.LastSeen = now;
-        return new SessionTouchResult(
-            SessionTouchStatus.Active,
-            new SessionResponse(sessionId, now.AddSeconds(info.TimeoutSeconds)));
-    }
-
-    public bool EndSession(string sessionId)
-    {
-        return _sessions.TryRemove(sessionId, out _);
-    }
-
-    public IEnumerable<SessionInfo> GetExpiredSessions(DateTimeOffset now)
-    {
-        foreach (var session in _sessions.Values)
-        {
-            if (now - session.LastSeen > TimeSpan.FromSeconds(session.TimeoutSeconds))
-            {
-                yield return session;
-            }
-        }
-    }
-
-    public void RemoveSession(string sessionId)
-    {
-        _sessions.TryRemove(sessionId, out _);
-    }
-}
-
-sealed class SessionInfo
-{
-    public SessionInfo(string id, string clientName, DateTimeOffset createdAt, DateTimeOffset lastSeen, int timeoutSeconds)
-    {
-        Id = id;
-        ClientName = clientName;
-        CreatedAt = createdAt;
-        LastSeen = lastSeen;
-        TimeoutSeconds = timeoutSeconds;
-    }
-
-    public string Id { get; }
-    public string ClientName { get; }
-    public DateTimeOffset CreatedAt { get; }
-    public DateTimeOffset LastSeen { get; set; }
-    public int TimeoutSeconds { get; }
-}
-
-record SessionResponse(string SessionId, DateTimeOffset ExpiresAt);
-
-record SessionTouchResult(SessionTouchStatus Status, SessionResponse? Response);
-
-enum SessionTouchStatus
-{
-    Active,
-    Expired,
-    NotFound,
-}
-
-sealed class SessionSweepService(SessionStore sessions) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            var now = DateTimeOffset.UtcNow;
-            foreach (var session in sessions.GetExpiredSessions(now))
-            {
-                sessions.RemoveSession(session.Id);
-            }
-
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(AppConstants.SessionSweepIntervalSeconds), stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                return;
-            }
-        }
-    }
-}
-
-sealed class DiscoveryService(
-    ILogger<DiscoveryService> logger,
-    TunnelState tunnelState,
-    UpnpState upnpState) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        using var udp = new UdpClient(AppConstants.DiscoveryPort);
-        udp.EnableBroadcast = true;
-        logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
-
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            UdpReceiveResult result;
-            try
-            {
-                result = await udp.ReceiveAsync(stoppingToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
-
-            var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
-            if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
-            var tunnelSnapshot = tunnelState.GetSnapshot();
-            var upnpSnapshot = upnpState.GetSnapshot();
-            var payload = JsonSerializer.Serialize(new
-            {
-                port = AppConstants.ServerPort,
-                token = TokenHelper.GetConfiguredToken(),
-                ips = NetworkHelper.GetLocalIps(),
-                tunnelUrl = tunnelSnapshot.Url,
-                externalUrl = upnpSnapshot.ExternalUrl,
-            });
-
-            var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
-            await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
-        }
-    }
-}
-
-static class NetworkHelper
-{
-    public static List<string> GetLocalIps()
-    {
-        var ips = new HashSet<string>();
-
-        foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (networkInterface.OperationalStatus != OperationalStatus.Up)
-            {
-                continue;
-            }
-
-            foreach (var address in networkInterface.GetIPProperties().UnicastAddresses)
-            {
-                if (address.Address.AddressFamily == AddressFamily.InterNetwork)
-                {
-                    var ip = address.Address.ToString();
-                    if (!ip.StartsWith("127.", StringComparison.Ordinal))
-                    {
-                        ips.Add(ip);
-                    }
-                }
-            }
-        }
-
-        return ips.Count > 0 ? ips.ToList() : new List<string> { "127.0.0.1" };
-    }
-}
-
-sealed class UpnpState
+public sealed class SecurityState
 {
     private readonly object _lock = new();
-    private UpnpSnapshot _snapshot = new(null, null, "disabled", null, null);
+    private PairingCode _current = new("000000", DateTimeOffset.UtcNow);
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _tokens = new();
 
-    public void Update(UpnpSnapshot snapshot)
+    public PairingCode GetCurrentPairingCode() { lock (_lock) { return _current; } }
+    public void RotateCode()
     {
         lock (_lock)
         {
-            _snapshot = snapshot;
+            _current = new PairingCode(RandomNumberGenerator.GetInt32(100000, 999999).ToString(), DateTimeOffset.UtcNow.AddMinutes(5));
+            Console.WriteLine($"Pairing code: {_current.Value} (exp: {_current.ExpiresAtUtc:O})");
         }
     }
 
-    public UpnpSnapshot GetSnapshot()
+    public bool TryPair(string code, string clientName, out string? token)
     {
+        token = null;
         lock (_lock)
         {
-            return _snapshot;
+            if (!string.Equals(_current.Value, code, StringComparison.Ordinal) || _current.ExpiresAtUtc < DateTimeOffset.UtcNow)
+                return false;
         }
-    }
-}
 
-record UpnpSnapshot(
-    string? ExternalIp,
-    string? ExternalUrl,
-    string Status,
-    DateTimeOffset? UpdatedAt,
-    string? Error);
-
-sealed class TunnelState
-{
-    private readonly object _lock = new();
-    private TunnelSnapshot _snapshot = new(null, "disabled", null, null);
-
-    public void Update(TunnelSnapshot snapshot)
-    {
-        lock (_lock)
-        {
-            _snapshot = snapshot;
-        }
+        token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
+        _tokens[token] = DateTimeOffset.UtcNow.AddDays(30);
+        Log.Information("paired client={ClientName}", clientName);
+        return true;
     }
 
-    public TunnelSnapshot GetSnapshot()
+    public bool IsValidToken(string token)
     {
-        lock (_lock)
-        {
-            return _snapshot;
-        }
+        if (!_tokens.TryGetValue(token, out var exp)) return false;
+        return exp > DateTimeOffset.UtcNow;
     }
 }
 
-record TunnelSnapshot(string? Url, string Status, DateTimeOffset? StartedAt, string? Error);
-
-sealed class SshTunnelService(
-    ILogger<SshTunnelService> logger,
-    TunnelState tunnelState) : BackgroundService
+sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
 {
-    private const string UrlPattern = @"https://[-a-zA-Z0-9]+\.lhr\.life|https://[-a-zA-Z0-9]+\.localhost\.run";
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
-    private Process? _process;
-
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (!IsTunnelEnabled())
-        {
-            tunnelState.Update(new TunnelSnapshot(null, "disabled", null, null));
-            return;
-        }
-
-        var startedAt = DateTimeOffset.UtcNow;
-
+        state.RotateCode();
         while (!stoppingToken.IsCancellationRequested)
         {
-            tunnelState.Update(new TunnelSnapshot(null, "starting", startedAt, null));
-
-            try
-            {
-                var sshPath = ResolveSshPath();
-                if (string.IsNullOrWhiteSpace(sshPath))
-                {
-                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "SSH client not found."));
-                    await Task.Delay(RetryDelay, stoppingToken);
-                    continue;
-                }
-
-                var localUrl = $"http://127.0.0.1:{AppConstants.ServerPort}";
-                var processStartInfo = new ProcessStartInfo
-                {
-                    FileName = sshPath,
-                    Arguments = BuildTunnelArgs(localUrl),
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                };
-
-                _process = new Process { StartInfo = processStartInfo, EnableRaisingEvents = true };
-                _process.OutputDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
-                _process.ErrorDataReceived += (_, args) => HandleProcessOutput(args.Data, startedAt);
-                _process.Exited += (_, _) =>
-                {
-                    var snapshot = tunnelState.GetSnapshot();
-                    if (snapshot.Status != "error")
-                    {
-                        tunnelState.Update(snapshot with { Status = "stopped", Error = "SSH tunnel exited." });
-                    }
-                };
-
-                if (!_process.Start())
-                {
-                    tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, "Failed to start SSH tunnel."));
-                    await Task.Delay(RetryDelay, stoppingToken);
-                    continue;
-                }
-
-                _process.BeginOutputReadLine();
-                _process.BeginErrorReadLine();
-
-                await _process.WaitForExitAsync(stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                tunnelState.Update(new TunnelSnapshot(null, "error", startedAt, ex.Message));
-                logger.LogError(ex, "SSH tunnel failed.");
-            }
-
-            try
-            {
-                await Task.Delay(RetryDelay, stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
+            await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
+            var current = state.GetCurrentPairingCode();
+            if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
+                state.RotateCode();
         }
-    }
-
-    public override Task StopAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            if (_process is { HasExited: false })
-            {
-                _process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to stop SSH tunnel process.");
-        }
-
-        return base.StopAsync(cancellationToken);
-    }
-
-    private static bool IsTunnelEnabled()
-    {
-        var value = Environment.GetEnvironmentVariable(AppConstants.TunnelEnabledEnv);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return true;
-        }
-
-        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
-            && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
-            && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string? ResolveSshPath()
-    {
-        var candidates = new List<string>();
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            candidates.Add("ssh.exe");
-            candidates.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "OpenSSH", "ssh.exe"));
-        }
-        else
-        {
-            candidates.Add("ssh");
-            candidates.Add("/usr/bin/ssh");
-            candidates.Add("/usr/local/bin/ssh");
-        }
-
-        foreach (var candidate in candidates)
-        {
-            try
-            {
-                if (File.Exists(candidate))
-                {
-                    return candidate;
-                }
-            }
-            catch
-            {
-            }
-        }
-
-        return null;
-    }
-
-    private static string BuildTunnelArgs(string localUrl)
-    {
-        var localHost = new Uri(localUrl).Port;
-        var forward = $"80:localhost:{localHost}";
-        return $"-o StrictHostKeyChecking=no -o ExitOnForwardFailure=yes -N -T -R {forward} nokey@localhost.run";
-    }
-
-    private void HandleProcessOutput(string? line, DateTimeOffset startedAt)
-    {
-        if (string.IsNullOrWhiteSpace(line))
-        {
-            return;
-        }
-
-        logger.LogInformation("ssh-tunnel: {Line}", line.Trim());
-
-        var match = Regex.Match(line, UrlPattern);
-        if (!match.Success)
-        {
-            return;
-        }
-
-        var url = match.Value;
-        var snapshot = tunnelState.GetSnapshot();
-        if (snapshot.Url == url && snapshot.Status == "ready")
-        {
-            return;
-        }
-
-        tunnelState.Update(new TunnelSnapshot(url, "ready", startedAt, null));
     }
 }
 
-sealed class UpnpPortMappingService(
-    ILogger<UpnpPortMappingService> logger,
-    UpnpState upnpState) : BackgroundService
+public sealed class ReplayProtectionService
 {
-    private const string MappingDescription = "PC Remote Server";
-    private const string ProtocolTcp = "TCP";
-    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan RefreshDelay = TimeSpan.FromMinutes(10);
-    private int? _mappedPort;
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _nonces = new();
 
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public bool Validate(string token, string tsRaw, string nonce, out string reason)
     {
-        if (!IsUpnpEnabled())
+        reason = "ok";
+        if (string.IsNullOrWhiteSpace(tsRaw) || string.IsNullOrWhiteSpace(nonce))
         {
-            upnpState.Update(new UpnpSnapshot(null, null, "disabled", null, null));
-            return;
+            reason = "timestamp/nonce required";
+            return false;
         }
-
-        while (!stoppingToken.IsCancellationRequested)
+        if (!long.TryParse(tsRaw, out var ts))
         {
-            try
-            {
-                upnpState.Update(new UpnpSnapshot(null, null, "starting", DateTimeOffset.UtcNow, null));
-
-                var mappingCollection = TryGetMappingCollection();
-                if (mappingCollection == null)
-                {
-                    upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "UPnP not available."));
-                    await Task.Delay(RetryDelay, stoppingToken);
-                    continue;
-                }
-
-                var localIp = NetworkHelper.GetLocalIps().FirstOrDefault();
-                if (string.IsNullOrWhiteSpace(localIp))
-                {
-                    upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, "No local IP found."));
-                    await Task.Delay(RetryDelay, stoppingToken);
-                    continue;
-                }
-
-                RemoveMapping(mappingCollection, AppConstants.ServerPort);
-                var mapping = mappingCollection.Add(AppConstants.ServerPort, ProtocolTcp, AppConstants.ServerPort, localIp, true, MappingDescription);
-                _mappedPort = AppConstants.ServerPort;
-
-                var externalIp = mapping?.ExternalIPAddress as string;
-                var externalUrl = externalIp == null ? null : $"http://{externalIp}:{AppConstants.ServerPort}";
-                upnpState.Update(new UpnpSnapshot(externalIp, externalUrl, "ready", DateTimeOffset.UtcNow, null));
-
-                await Task.Delay(RefreshDelay, stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-            catch (Exception ex)
-            {
-                upnpState.Update(new UpnpSnapshot(null, null, "error", DateTimeOffset.UtcNow, ex.Message));
-                logger.LogWarning(ex, "UPnP port mapping failed.");
-            }
-
-            try
-            {
-                await Task.Delay(RetryDelay, stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                break;
-            }
-        }
-    }
-
-    public override async Task StopAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            if (_mappedPort.HasValue)
-            {
-                var mappingCollection = TryGetMappingCollection();
-                if (mappingCollection != null)
-                {
-                    RemoveMapping(mappingCollection, _mappedPort.Value);
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to remove UPnP port mapping.");
-        }
-
-        await base.StopAsync(cancellationToken);
-    }
-
-    private static dynamic? TryGetMappingCollection()
-    {
-        var upnpType = Type.GetTypeFromProgID("HNetCfg.NATUPnP");
-        if (upnpType == null)
-        {
-            return null;
-        }
-
-        dynamic upnp = Activator.CreateInstance(upnpType);
-        return upnp?.StaticPortMappingCollection;
-    }
-
-    private static void RemoveMapping(dynamic mappingCollection, int port)
-    {
-        try
-        {
-            mappingCollection.Remove(port, ProtocolTcp);
-        }
-        catch
-        {
-            // Ignore missing mapping.
-        }
-    }
-
-    private static bool IsUpnpEnabled()
-    {
-        var value = Environment.GetEnvironmentVariable(AppConstants.UpnpEnabledEnv);
-        if (string.IsNullOrWhiteSpace(value))
-        {
-            return true;
-        }
-
-        return !value.Equals("0", StringComparison.OrdinalIgnoreCase)
-            && !value.Equals("false", StringComparison.OrdinalIgnoreCase)
-            && !value.Equals("off", StringComparison.OrdinalIgnoreCase);
-    }
-}
-
-static class SystemMetrics
-{
-    private static readonly PerformanceCounter CpuCounter = new("Processor", "% Processor Time", "_Total");
-
-    public static double GetCpuUsage()
-    {
-        try
-        {
-            _ = CpuCounter.NextValue();
-            Thread.Sleep(100);
-            return Math.Round(CpuCounter.NextValue(), 2);
-        }
-        catch
-        {
-            return 0;
-        }
-    }
-
-    public static MemoryStatus GetMemoryStatus()
-    {
-        var status = new MEMORYSTATUSEX { dwLength = (uint)Marshal.SizeOf<MEMORYSTATUSEX>() };
-        GlobalMemoryStatusEx(ref status);
-        var total = (long)status.ullTotalPhys;
-        var available = (long)status.ullAvailPhys;
-        var used = total - available;
-        var percent = total == 0 ? 0 : (double)used / total * 100;
-        return new MemoryStatus(total, available, used, Math.Round(percent, 2));
-    }
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
-    private struct MEMORYSTATUSEX
-    {
-        public uint dwLength;
-        public uint dwMemoryLoad;
-        public ulong ullTotalPhys;
-        public ulong ullAvailPhys;
-        public ulong ullTotalPageFile;
-        public ulong ullAvailPageFile;
-        public ulong ullTotalVirtual;
-        public ulong ullAvailVirtual;
-        public ulong ullAvailExtendedVirtual;
-    }
-
-    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
-}
-
-record MemoryStatus(long Total, long Available, long Used, double Percent);
-
-static class ScreenCapture
-{
-    public static byte[] CapturePng()
-    {
-        using var bitmap = CaptureBitmap();
-        using var stream = new MemoryStream();
-        bitmap.Save(stream, System.Drawing.Imaging.ImageFormat.Png);
-        return stream.ToArray();
-    }
-
-    public static async IAsyncEnumerable<byte[]> StreamFrames(int fps, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
-    {
-        fps = Math.Clamp(fps, 1, 30);
-        var delay = TimeSpan.FromSeconds(1.0 / fps);
-        while (!token.IsCancellationRequested)
-        {
-            var frame = CapturePng();
-            var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
-            var footer = "\r\n";
-            var headerBytes = System.Text.Encoding.UTF8.GetBytes(header);
-            var footerBytes = System.Text.Encoding.UTF8.GetBytes(footer);
-
-            var payload = new byte[headerBytes.Length + frame.Length + footerBytes.Length];
-            Buffer.BlockCopy(headerBytes, 0, payload, 0, headerBytes.Length);
-            Buffer.BlockCopy(frame, 0, payload, headerBytes.Length, frame.Length);
-            Buffer.BlockCopy(footerBytes, 0, payload, headerBytes.Length + frame.Length, footerBytes.Length);
-
-            yield return payload;
-
-            try
-            {
-                await Task.Delay(delay, token);
-            }
-            catch (TaskCanceledException)
-            {
-                yield break;
-            }
-        }
-    }
-
-    private static System.Drawing.Bitmap CaptureBitmap()
-    {
-        var bounds = System.Windows.Forms.Screen.PrimaryScreen?.Bounds ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
-        var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height);
-        using var graphics = System.Drawing.Graphics.FromImage(bitmap);
-        graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size);
-        return bitmap;
-    }
-}
-
-static class InputController
-{
-    public static void MoveMouseAbsolute(int x, int y, double duration)
-    {
-        if (duration > 0)
-        {
-            Thread.Sleep(TimeSpan.FromSeconds(duration));
-        }
-
-        var screen = System.Windows.Forms.Screen.PrimaryScreen?.Bounds ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
-        var normalizedX = (int)Math.Round(x * 65535.0 / screen.Width);
-        var normalizedY = (int)Math.Round(y * 65535.0 / screen.Height);
-        SendMouseInput(normalizedX, normalizedY, MouseEventFlags.Move | MouseEventFlags.Absolute);
-    }
-
-    public static void MoveMouseRelative(int x, int y, double duration)
-    {
-        if (duration > 0)
-        {
-            Thread.Sleep(TimeSpan.FromSeconds(duration));
-        }
-
-        SendMouseInput(x, y, MouseEventFlags.Move);
-    }
-
-    public static void MouseClick(MouseClickRequest request)
-    {
-        for (var i = 0; i < request.Clicks; i++)
-        {
-            if (request.X.HasValue && request.Y.HasValue)
-            {
-                MoveMouseAbsolute(request.X.Value, request.Y.Value, 0);
-            }
-
-            var flags = request.Button switch
-            {
-                "right" => MouseEventFlags.RightDown | MouseEventFlags.RightUp,
-                "middle" => MouseEventFlags.MiddleDown | MouseEventFlags.MiddleUp,
-                _ => MouseEventFlags.LeftDown | MouseEventFlags.LeftUp,
-            };
-
-            SendMouseInput(0, 0, flags);
-            if (request.Interval > 0)
-            {
-                Thread.Sleep(TimeSpan.FromSeconds(request.Interval));
-            }
-        }
-    }
-
-    public static void KeyboardPress(KeyboardPressRequest request)
-    {
-        if (request.Keys is { Count: > 0 })
-        {
-            foreach (var key in request.Keys)
-            {
-                SendKey(key, true);
-            }
-
-            for (var i = request.Keys.Count - 1; i >= 0; i--)
-            {
-                SendKey(request.Keys[i], false);
-            }
-
-            return;
-        }
-
-        if (string.IsNullOrWhiteSpace(request.Key))
-        {
-            return;
-        }
-
-        for (var i = 0; i < request.Presses; i++)
-        {
-            SendKey(request.Key, true);
-            SendKey(request.Key, false);
-            if (request.Interval > 0)
-            {
-                Thread.Sleep(TimeSpan.FromSeconds(request.Interval));
-            }
-        }
-    }
-
-    public static void AdjustVolume(string action, int steps)
-    {
-        var key = action switch
-        {
-            "up" => "volumeup",
-            "down" => "volumedown",
-            "mute" => "volumemute",
-            _ => string.Empty,
-        };
-
-        if (string.IsNullOrEmpty(key))
-        {
-            return;
-        }
-
-        for (var i = 0; i < steps; i++)
-        {
-            SendKey(key, true);
-            SendKey(key, false);
-        }
-    }
-
-    private static void SendKey(string key, bool keyDown)
-    {
-        if (!KeyMap.TryGetValue(key.ToLowerInvariant(), out var vk))
-        {
-            return;
-        }
-
-        var input = new INPUT
-        {
-            type = InputType.Keyboard,
-            U = new InputUnion
-            {
-                ki = new KEYBDINPUT
-                {
-                    wVk = vk,
-                    dwFlags = keyDown ? 0u : KEYEVENTF_KEYUP,
-                },
-            },
-        };
-
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
-    }
-
-    private static void SendMouseInput(int x, int y, MouseEventFlags flags)
-    {
-        var input = new INPUT
-        {
-            type = InputType.Mouse,
-            U = new InputUnion
-            {
-                mi = new MOUSEINPUT
-                {
-                    dx = x,
-                    dy = y,
-                    dwFlags = flags,
-                },
-            },
-        };
-
-        SendInput(1, new[] { input }, Marshal.SizeOf<INPUT>());
-    }
-
-    private static readonly Dictionary<string, ushort> KeyMap = new(StringComparer.OrdinalIgnoreCase)
-    {
-        ["enter"] = 0x0D,
-        ["esc"] = 0x1B,
-        ["escape"] = 0x1B,
-        ["tab"] = 0x09,
-        ["space"] = 0x20,
-        ["backspace"] = 0x08,
-        ["delete"] = 0x2E,
-        ["up"] = 0x26,
-        ["down"] = 0x28,
-        ["left"] = 0x25,
-        ["right"] = 0x27,
-        ["ctrl"] = 0x11,
-        ["shift"] = 0x10,
-        ["alt"] = 0x12,
-        ["f1"] = 0x70,
-        ["f2"] = 0x71,
-        ["f3"] = 0x72,
-        ["f4"] = 0x73,
-        ["f5"] = 0x74,
-        ["f6"] = 0x75,
-        ["f7"] = 0x76,
-        ["f8"] = 0x77,
-        ["f9"] = 0x78,
-        ["f10"] = 0x79,
-        ["f11"] = 0x7A,
-        ["f12"] = 0x7B,
-        ["volumeup"] = 0xAF,
-        ["volumedown"] = 0xAE,
-        ["volumemute"] = 0xAD,
-    };
-
-    private const uint KEYEVENTF_KEYUP = 0x0002;
-
-    private enum InputType : uint
-    {
-        Mouse = 0,
-        Keyboard = 1,
-    }
-
-    [Flags]
-    private enum MouseEventFlags : uint
-    {
-        Move = 0x0001,
-        LeftDown = 0x0002,
-        LeftUp = 0x0004,
-        RightDown = 0x0008,
-        RightUp = 0x0010,
-        MiddleDown = 0x0020,
-        MiddleUp = 0x0040,
-        Absolute = 0x8000,
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct INPUT
-    {
-        public InputType type;
-        public InputUnion U;
-    }
-
-    [StructLayout(LayoutKind.Explicit)]
-    private struct InputUnion
-    {
-        [FieldOffset(0)]
-        public MOUSEINPUT mi;
-        [FieldOffset(0)]
-        public KEYBDINPUT ki;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct MOUSEINPUT
-    {
-        public int dx;
-        public int dy;
-        public uint mouseData;
-        public MouseEventFlags dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct KEYBDINPUT
-    {
-        public ushort wVk;
-        public ushort wScan;
-        public uint dwFlags;
-        public uint time;
-        public IntPtr dwExtraInfo;
-    }
-
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern uint SendInput(uint nInputs, INPUT[] pInputs, int cbSize);
-}
-
-static class SystemPower
-{
-    public static bool Execute(string action)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
+            reason = "invalid timestamp";
             return false;
         }
 
-        string[]? command = action switch
+        var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        if (Math.Abs(now - ts) > 60)
         {
-            "shutdown" => new[] { "shutdown", "/s", "/t", "0" },
-            "restart" => new[] { "shutdown", "/r", "/t", "0" },
-            "lock" => new[] { "rundll32.exe", "user32.dll,LockWorkStation" },
-            "logoff" => new[] { "shutdown", "/l" },
-            "sleep" => new[] { "rundll32.exe", "powrprof.dll,SetSuspendState", "0,1,0" },
-            "hibernate" => new[] { "shutdown", "/h" },
-            _ => null,
-        };
-
-        if (command is null)
-        {
+            reason = "timestamp outside allowed window";
             return false;
         }
 
-        var process = new ProcessStartInfo(command[0])
+        var key = $"{token}:{nonce}";
+        if (!_nonces.TryAdd(key, DateTimeOffset.UtcNow.AddMinutes(5)))
         {
-            UseShellExecute = false,
-        };
-        for (var i = 1; i < command.Length; i++)
-        {
-            process.ArgumentList.Add(command[i]);
+            reason = "replay nonce";
+            return false;
         }
 
-        Process.Start(process);
+        foreach (var item in _nonces.Where(x => x.Value < DateTimeOffset.UtcNow).ToList())
+            _nonces.TryRemove(item.Key, out _);
+
         return true;
     }
 }
 
-static class AudioController
+interface IStatusService { object GetStatus(); }
+sealed class StatusService : IStatusService
 {
-    public static void SetMasterVolume(float level)
+    public object GetStatus()
     {
-        var clamped = Math.Clamp(level, 0f, 1f);
-        var enumerator = new MMDeviceEnumerator() as IMMDeviceEnumerator;
-        if (enumerator == null)
+        var uptime = TimeSpan.FromMilliseconds(Environment.TickCount64).TotalSeconds;
+        var drives = DriveInfo.GetDrives().Where(d => d.IsReady).Select(d => new { d.Name, d.TotalSize, d.AvailableFreeSpace });
+        var ips = NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up)
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+            .Select(a => a.Address.ToString())
+            .Distinct()
+            .ToList();
+
+        return new
         {
-            return;
-        }
-
-        Marshal.ThrowExceptionForHR(enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out var device));
-        var audioEndpointVolumeGuid = IAudioEndpointVolumeGuid;
-        Marshal.ThrowExceptionForHR(device.Activate(ref audioEndpointVolumeGuid, CLSCTX_ALL, IntPtr.Zero, out var volumeObject));
-        var volume = (IAudioEndpointVolume)volumeObject;
-        Marshal.ThrowExceptionForHR(volume.SetMasterVolumeLevelScalar(clamped, Guid.Empty));
-    }
-
-    private static readonly Guid IAudioEndpointVolumeGuid = typeof(IAudioEndpointVolume).GUID;
-    private const int CLSCTX_ALL = 23;
-
-    private enum EDataFlow
-    {
-        eRender,
-        eCapture,
-        eAll,
-    }
-
-    private enum ERole
-    {
-        eConsole,
-        eMultimedia,
-        eCommunications,
-    }
-
-    [ComImport]
-    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    private class MMDeviceEnumerator
-    {
-    }
-
-    [ComImport]
-    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDeviceEnumerator
-    {
-        int EnumAudioEndpoints(EDataFlow dataFlow, int dwStateMask, out object ppDevices);
-        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppEndpoint);
-        int GetDevice(string pwstrId, out IMMDevice ppDevice);
-        int RegisterEndpointNotificationCallback(IntPtr pClient);
-        int UnregisterEndpointNotificationCallback(IntPtr pClient);
-    }
-
-    [ComImport]
-    [Guid("D666063F-1587-4E43-81F1-B948E807363F")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDevice
-    {
-        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, out object ppInterface);
-    }
-
-    [ComImport]
-    [Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IAudioEndpointVolume
-    {
-        int RegisterControlChangeNotify(IntPtr pNotify);
-        int UnregisterControlChangeNotify(IntPtr pNotify);
-        int GetChannelCount(out int pnChannelCount);
-        int SetMasterVolumeLevel(float fLevelDB, Guid pguidEventContext);
-        int SetMasterVolumeLevelScalar(float fLevel, Guid pguidEventContext);
-        int GetMasterVolumeLevel(out float pfLevelDB);
-        int GetMasterVolumeLevelScalar(out float pfLevel);
-        int SetChannelVolumeLevel(uint nChannel, float fLevelDB, Guid pguidEventContext);
-        int SetChannelVolumeLevelScalar(uint nChannel, float fLevel, Guid pguidEventContext);
-        int GetChannelVolumeLevel(uint nChannel, out float pfLevelDB);
-        int GetChannelVolumeLevelScalar(uint nChannel, out float pfLevel);
-        int SetMute(bool bMute, Guid pguidEventContext);
-        int GetMute(out bool pbMute);
-        int GetVolumeStepInfo(out uint pnStep, out uint pnStepCount);
-        int VolumeStepUp(Guid pguidEventContext);
-        int VolumeStepDown(Guid pguidEventContext);
-        int QueryHardwareSupport(out uint pdwHardwareSupportMask);
-        int GetVolumeRange(out float pflVolumeMindB, out float pflVolumeMaxdB, out float pflVolumeIncrementdB);
+            uptimeSeconds = uptime,
+            machineName = Environment.MachineName,
+            userName = Environment.UserName,
+            memory = new Microsoft.VisualBasic.Devices.ComputerInfo().TotalPhysicalMemory,
+            drives,
+            ips,
+        };
     }
 }
 
-sealed class RecordingStore
+interface ISystemService { bool Power(string action); }
+sealed class SystemService : ISystemService
 {
-    private readonly ConcurrentDictionary<string, RecordingInfo> _recordings = new();
-    private readonly string _recordingDirectory;
-
-    public RecordingStore()
+    public bool Power(string action)
     {
-        _recordingDirectory = Path.Combine(AppContext.BaseDirectory, "recordings");
-        Directory.CreateDirectory(_recordingDirectory);
-    }
-
-    public RecordingInfo StartRecording(ScreenRecordStartRequest request)
-    {
-        var id = Guid.NewGuid().ToString();
-        var info = new RecordingInfo
+        try
         {
-            Id = id,
-            File = Path.Combine(_recordingDirectory, $"screen_{id}.mpng"),
-            StartedAt = DateTimeOffset.UtcNow,
-            Fps = Math.Clamp(request.Fps, 1, 30),
-            DurationSeconds = request.DurationSeconds,
-        };
-
-        var cts = new CancellationTokenSource();
-        info.StopToken = cts;
-        _recordings[id] = info;
-
-        _ = Task.Run(() => RecordTask(info, cts.Token));
-
-        return info;
-    }
-
-    public bool StopRecording(string recordingId)
-    {
-        if (!_recordings.TryGetValue(recordingId, out var info))
-        {
-            return false;
+            switch (action.ToLowerInvariant())
+            {
+                case "shutdown": Process.Start("shutdown", "/s /t 0"); return true;
+                case "restart": Process.Start("shutdown", "/r /t 0"); return true;
+                case "sleep": Process.Start("rundll32.exe", "powrprof.dll,SetSuspendState 0,1,0"); return true;
+                case "lock": LockWorkStation(); return true;
+                default: return false;
+            }
         }
+        catch { return false; }
+    }
 
-        info.StopToken?.Cancel();
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
+}
+
+interface IInputService
+{
+    void MoveMouse(int dx, int dy);
+    void Click(string button, bool dbl);
+    void Scroll(int delta);
+    void TypeText(string text);
+    void Hotkey(List<string> keys);
+}
+sealed class InputService : IInputService
+{
+    public void MoveMouse(int dx, int dy)
+    {
+        mouse_event(0x0001, dx, dy, 0, UIntPtr.Zero);
+    }
+    public void Click(string button, bool dbl)
+    {
+        var (down, up) = button.ToLowerInvariant() switch
+        {
+            "right" => (0x0008u, 0x0010u),
+            _ => (0x0002u, 0x0004u),
+        };
+        mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+        mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+        if (dbl)
+        {
+            mouse_event(down, 0, 0, 0, UIntPtr.Zero);
+            mouse_event(up, 0, 0, 0, UIntPtr.Zero);
+        }
+    }
+    public void Scroll(int delta) => mouse_event(0x0800, 0, 0, (uint)delta, UIntPtr.Zero);
+    public void TypeText(string text) => SendKeys.SendWait(text);
+    public void Hotkey(List<string> keys)
+    {
+        var map = new Dictionary<string, byte> { ["ctrl"] = 0x11, ["alt"] = 0x12, ["shift"] = 0x10, ["win"] = 0x5B, ["esc"] = 0x1B, ["enter"] = 0x0D };
+        var vks = keys.Select(k => map.GetValueOrDefault(k.ToLowerInvariant(), (byte)0)).Where(v => v != 0).ToList();
+        foreach (var vk in vks) keybd_event(vk, 0, 0, UIntPtr.Zero);
+        for (var i = vks.Count - 1; i >= 0; i--) keybd_event(vks[i], 0, 2, UIntPtr.Zero);
+    }
+
+    [DllImport("user32.dll")] static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, UIntPtr dwExtraInfo);
+    [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+
+interface IScreenService { byte[] CapturePng(); byte[]? CaptureCameraJpeg(); }
+sealed class ScreenService : IScreenService
+{
+    public byte[] CapturePng()
+    {
+        var bounds = Screen.PrimaryScreen?.Bounds ?? new System.Drawing.Rectangle(0, 0, 1920, 1080);
+        using var bmp = new System.Drawing.Bitmap(bounds.Width, bounds.Height);
+        using var g = System.Drawing.Graphics.FromImage(bmp);
+        g.CopyFromScreen(bounds.Location, System.Drawing.Point.Empty, bounds.Size);
+        using var ms = new MemoryStream();
+        bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        return ms.ToArray();
+    }
+
+    public byte[]? CaptureCameraJpeg()
+    {
+        // Minimal fallback to keep endpoint stable in rewrite phase.
+        // If dedicated camera driver/library is unavailable, return null.
+        return null;
+    }
+}
+
+interface IMediaService { bool Execute(string action); }
+sealed class MediaService : IMediaService
+{
+    public bool Execute(string action)
+    {
+        var vk = action.ToLowerInvariant() switch
+        {
+            "playpause" => 0xB3,
+            "next" => 0xB0,
+            "prev" => 0xB1,
+            "volumeup" => 0xAF,
+            "volumedown" => 0xAE,
+            "mute" => 0xAD,
+            _ => -1
+        };
+        if (vk < 0) return false;
+        keybd_event((byte)vk, 0, 0, UIntPtr.Zero);
+        keybd_event((byte)vk, 0, 2, UIntPtr.Zero);
         return true;
     }
 
-    public IDictionary<string, object> GetStatus()
+    [DllImport("user32.dll")] static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, UIntPtr dwExtraInfo);
+}
+
+interface IProcessService { List<ProcessInfoDto> List(); bool Kill(int pid); }
+sealed class ProcessService : IProcessService
+{
+    public List<ProcessInfoDto> List() => Process.GetProcesses().Select(p =>
     {
-        return _recordings.ToDictionary(
-            item => item.Key,
-            item => (object)new
-            {
-                startedAt = item.Value.StartedAt,
-                fps = item.Value.Fps,
-                durationSeconds = item.Value.DurationSeconds,
-                completed = item.Value.Completed,
-                file = item.Value.File,
-            });
-    }
+        long mem = 0;
+        try { mem = p.WorkingSet64; } catch { }
+        return new ProcessInfoDto(p.Id, p.ProcessName, mem);
+    }).OrderByDescending(x => x.MemoryBytes).Take(200).ToList();
 
-    private async Task RecordTask(RecordingInfo info, CancellationToken token)
+    public bool Kill(int pid)
     {
-        var delay = TimeSpan.FromSeconds(1.0 / info.Fps);
-        var deadline = info.DurationSeconds.HasValue
-            ? info.StartedAt.AddSeconds(info.DurationSeconds.Value)
-            : (DateTimeOffset?)null;
-
-        await using var stream = new FileStream(info.File, FileMode.Append, FileAccess.Write, FileShare.Read);
-
-        try
-        {
-            while (!token.IsCancellationRequested)
-            {
-                var frame = ScreenCapture.CapturePng();
-                var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/png\r\n\r\n";
-                var footer = "\r\n";
-
-                await stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(header), token);
-                await stream.WriteAsync(frame, token);
-                await stream.WriteAsync(System.Text.Encoding.UTF8.GetBytes(footer), token);
-                await stream.FlushAsync(token);
-
-                if (deadline.HasValue && DateTimeOffset.UtcNow >= deadline.Value)
-                {
-                    break;
-                }
-
-                await Task.Delay(delay, token);
-            }
-        }
-        catch (OperationCanceledException)
-        {
-        }
-        finally
-        {
-            info.Completed = true;
-        }
-    }
-
-    public sealed class RecordingInfo
-    {
-        public string Id { get; init; } = string.Empty;
-        public DateTimeOffset StartedAt { get; init; }
-        public int Fps { get; init; }
-        public int? DurationSeconds { get; init; }
-        public string File { get; init; } = string.Empty;
-        public CancellationTokenSource? StopToken { get; set; }
-        public bool Completed { get; set; }
+        try { Process.GetProcessById(pid).Kill(); return true; } catch { return false; }
     }
 }
 
-sealed class MetricsStore
+interface IFileService
 {
-    private readonly object _lock = new();
-    private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
-    private NetworkSample? _previousNetwork;
-    private readonly PerformanceCounter _cpuCounter = new("Processor", "% Processor Time", "_Total");
+    List<FileEntryDto> List(string path);
+    bool CreateFolder(string path);
+    bool Rename(string src, string dst);
+    bool Delete(string path);
+    Task<string> Upload(string targetDir, IFormFile file);
+}
 
-    public MetricsSnapshot GetSnapshot()
+sealed class FileService : IFileService
+{
+    public List<FileEntryDto> List(string path)
     {
-        lock (_lock)
+        if (string.IsNullOrWhiteSpace(path)) path = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        var dir = new DirectoryInfo(path);
+        if (!dir.Exists) return [];
+
+        return dir.EnumerateFileSystemInfos().Select(f =>
         {
-            return _snapshot;
-        }
+            var isDir = (f.Attributes & FileAttributes.Directory) != 0;
+            var size = isDir ? 0 : (f as FileInfo)?.Length ?? 0;
+            return new FileEntryDto(f.Name, f.FullName, isDir, size);
+        }).ToList();
     }
 
-    public void Sample()
-    {
-        var uptime = TimeSpan.FromMilliseconds(Environment.TickCount64);
-        var cpuUsage = GetCpuUsage();
-        var gpuUsage = GetGpuUsage();
-        var memory = SystemMetrics.GetMemoryStatus();
-        var temperatures = TemperatureReader.GetTemperatures();
-        var battery = BatteryReader.GetBatteryStatus();
-        var network = GetNetworkStats();
-        var disks = DriveInfo.GetDrives()
-            .Where(d => d.IsReady)
-            .Select(d => new DiskInfo(
-                d.Name,
-                d.TotalSize,
-                d.AvailableFreeSpace))
-            .ToList();
-        var processes = Process.GetProcesses()
-            .OrderByDescending(p => p.WorkingSet64)
-            .Take(8)
-            .Select(p =>
-            {
-                var cpuSeconds = 0d;
-                try
-                {
-                    cpuSeconds = p.TotalProcessorTime.TotalSeconds;
-                }
-                catch
-                {
-                    cpuSeconds = 0;
-                }
-                return new ProcessInfo(p.Id, p.ProcessName, p.WorkingSet64, cpuSeconds);
-            })
-            .ToList();
-
-        var snapshot = new MetricsSnapshot(
-            uptime.TotalSeconds,
-            cpuUsage,
-            gpuUsage,
-            new MemoryInfo(memory.Total, memory.Available, memory.Used, memory.Percent),
-            temperatures,
-            battery,
-            network,
-            disks,
-            processes);
-
-        lock (_lock)
-        {
-            _snapshot = snapshot;
-        }
-    }
-
-    private double GetCpuUsage()
+    public bool CreateFolder(string path) { try { Directory.CreateDirectory(path); return true; } catch { return false; } }
+    public bool Rename(string src, string dst)
     {
         try
         {
-            _ = _cpuCounter.NextValue();
-            Thread.Sleep(100);
-            return Math.Round(_cpuCounter.NextValue(), 2);
+            if (File.Exists(src)) File.Move(src, dst, true);
+            else if (Directory.Exists(src)) Directory.Move(src, dst);
+            else return false;
+            return true;
         }
-        catch
-        {
-            return 0;
-        }
+        catch { return false; }
     }
-
-    private double? GetGpuUsage()
+    public bool Delete(string path)
     {
         try
         {
-            var category = new PerformanceCounterCategory("GPU Engine");
-            var counters = category.GetInstanceNames()
-                .Where(name => name.Contains("engtype_3D", StringComparison.OrdinalIgnoreCase))
-                .Select(name => new PerformanceCounter("GPU Engine", "Utilization Percentage", name))
-                .ToList();
-
-            if (counters.Count == 0)
-            {
-                return null;
-            }
-
-            double sum = 0;
-            foreach (var counter in counters)
-            {
-                _ = counter.NextValue();
-            }
-            Thread.Sleep(100);
-            foreach (var counter in counters)
-            {
-                sum += counter.NextValue();
-            }
-            return Math.Round(Math.Min(sum, 100), 2);
+            if (File.Exists(path)) File.Delete(path);
+            else if (Directory.Exists(path)) Directory.Delete(path, true);
+            else return false;
+            return true;
         }
-        catch
-        {
-            return null;
-        }
+        catch { return false; }
     }
 
-    private NetworkInfo GetNetworkStats()
+    public async Task<string> Upload(string targetDir, IFormFile file)
     {
-        var now = DateTimeOffset.UtcNow;
-        long received = 0;
-        long sent = 0;
-
-        foreach (var nic in NetworkInterface.GetAllNetworkInterfaces())
-        {
-            if (nic.OperationalStatus != OperationalStatus.Up)
-            {
-                continue;
-            }
-
-            var stats = nic.GetIPv4Statistics();
-            received += stats.BytesReceived;
-            sent += stats.BytesSent;
-        }
-
-        if (_previousNetwork is null)
-        {
-            _previousNetwork = new NetworkSample(now, received, sent);
-            return new NetworkInfo(0, 0);
-        }
-
-        var duration = Math.Max(1, (now - _previousNetwork.Timestamp).TotalSeconds);
-        var download = (received - _previousNetwork.BytesReceived) / duration;
-        var upload = (sent - _previousNetwork.BytesSent) / duration;
-        _previousNetwork = new NetworkSample(now, received, sent);
-        return new NetworkInfo(Math.Max(0, download), Math.Max(0, upload));
-    }
-
-    private record NetworkSample(DateTimeOffset Timestamp, long BytesReceived, long BytesSent);
-}
-
-sealed class MetricsSamplingService(MetricsStore metrics) : BackgroundService
-{
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
-    {
-        while (!stoppingToken.IsCancellationRequested)
-        {
-            metrics.Sample();
-            try
-            {
-                await Task.Delay(TimeSpan.FromSeconds(1), stoppingToken);
-            }
-            catch (TaskCanceledException)
-            {
-                return;
-            }
-        }
+        Directory.CreateDirectory(targetDir);
+        var full = Path.Combine(targetDir, Path.GetFileName(file.FileName));
+        await using var fs = File.Create(full);
+        await file.CopyToAsync(fs);
+        return full;
     }
 }
 
-record MetricsSnapshot(
-    double UptimeSeconds,
-    double CpuUsagePercent,
-    double? GpuUsagePercent,
-    MemoryInfo Memory,
-    TemperatureInfo? Temperatures,
-    BatteryInfo? Battery,
-    NetworkInfo Network,
-    List<DiskInfo> Disks,
-    List<ProcessInfo> Processes)
+interface IClipboardService { string? ReadText(); void WriteText(string text); }
+sealed class ClipboardService : IClipboardService
 {
-    public static MetricsSnapshot Empty => new(
-        0,
-        0,
-        null,
-        new MemoryInfo(0, 0, 0, 0),
-        null,
-        null,
-        new NetworkInfo(0, 0),
-        new List<DiskInfo>(),
-        new List<ProcessInfo>());
-}
+    public string? ReadText() => RunSta(() => Clipboard.ContainsText() ? Clipboard.GetText() : null);
+    public void WriteText(string text) => RunSta(() => Clipboard.SetText(text));
 
-record MemoryInfo(long Total, long Available, long Used, double Percent);
-
-record TemperatureInfo(double? CpuCelsius, double? GpuCelsius);
-
-record BatteryInfo(bool IsPresent, int ChargePercent, bool IsCharging, int? SecondsRemaining);
-
-record NetworkInfo(double DownloadBytesPerSec, double UploadBytesPerSec);
-
-record DiskInfo(string Name, long TotalBytes, long FreeBytes);
-
-record ProcessInfo(int Id, string Name, long MemoryBytes, double CpuSeconds);
-
-static class TemperatureReader
-{
-    public static TemperatureInfo? GetTemperatures()
+    private static T? RunSta<T>(Func<T?> action)
     {
-        try
+        T? result = default;
+        Exception? ex = null;
+        var thread = new Thread(() =>
         {
-            double? cpuTemp = null;
-            using var searcher = new ManagementObjectSearcher(
-                "root\\WMI",
-                "SELECT CurrentTemperature FROM MSAcpi_ThermalZoneTemperature");
-            foreach (var obj in searcher.Get())
-            {
-                if (obj["CurrentTemperature"] is uint temp)
-                {
-                    cpuTemp = Math.Round((temp / 10.0) - 273.15, 1);
-                    break;
-                }
-            }
-
-            return new TemperatureInfo(cpuTemp, null);
-        }
-        catch
-        {
-            return null;
-        }
+            try { result = action(); }
+            catch (Exception e) { ex = e; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (ex != null) throw ex;
+        return result;
     }
-}
 
-static class BatteryReader
-{
-    public static BatteryInfo? GetBatteryStatus()
+    private static void RunSta(Action action)
     {
-        try
+        Exception? ex = null;
+        var thread = new Thread(() =>
         {
-            var status = System.Windows.Forms.SystemInformation.PowerStatus;
-            var present = status.BatteryChargeStatus != System.Windows.Forms.BatteryChargeStatus.NoSystemBattery;
-            var percent = (int)Math.Round(status.BatteryLifePercent * 100);
-            var charging = status.PowerLineStatus == System.Windows.Forms.PowerLineStatus.Online;
-            var seconds = status.BatteryLifeRemaining >= 0
-                ? (int?)status.BatteryLifeRemaining
-                : null;
-            return new BatteryInfo(present, percent, charging, seconds);
-        }
-        catch
-        {
-            return null;
-        }
+            try { action(); }
+            catch (Exception e) { ex = e; }
+        });
+        thread.SetApartmentState(ApartmentState.STA);
+        thread.Start();
+        thread.Join();
+        if (ex != null) throw ex;
     }
 }
