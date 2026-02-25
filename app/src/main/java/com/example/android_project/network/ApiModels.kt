@@ -59,16 +59,24 @@ data class SessionEndRequest(
 
 data class SessionStartResponse(
     @Json(name = "sessionId")
-    val sessionId: String,
+    val sessionId: String? = null,
+    @Json(name = "session_id")
+    val sessionIdSnake: String? = null,
     @Json(name = "expiresAt")
-    val expiresAt: String,
+    val expiresAt: String? = null,
+    @Json(name = "expires_at")
+    val expiresAtSnake: String? = null,
 )
 
 data class SessionStatusResponse(
     @Json(name = "sessionId")
-    val sessionId: String,
+    val sessionId: String? = null,
+    @Json(name = "session_id")
+    val sessionIdSnake: String? = null,
     @Json(name = "expiresAt")
-    val expiresAt: String,
+    val expiresAt: String? = null,
+    @Json(name = "expires_at")
+    val expiresAtSnake: String? = null,
 )
 
 data class SystemPowerRequest(
@@ -82,9 +90,11 @@ data class ScreenRecordStartRequest(
 )
 
 data class ScreenRecordStartResponse(
-    val status: String,
+    val status: String? = null,
     @Json(name = "recordingId")
-    val recordingId: String,
+    val recordingId: String? = null,
+    @Json(name = "recording_id")
+    val recordingIdSnake: String? = null,
 )
 
 data class ScreenRecordStopResponse(
