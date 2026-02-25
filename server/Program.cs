@@ -449,43 +449,72 @@ sealed class DiscoveryService(
     TunnelState tunnelState,
     UpnpState upnpState) : BackgroundService
 {
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(15);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var udp = new UdpClient(AppConstants.DiscoveryPort);
-        udp.EnableBroadcast = true;
-        logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
-
         while (!stoppingToken.IsCancellationRequested)
         {
-            UdpReceiveResult result;
             try
             {
-                result = await udp.ReceiveAsync(stoppingToken);
+                using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, AppConstants.DiscoveryPort));
+                udp.EnableBroadcast = true;
+                logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
+
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    UdpReceiveResult result;
+                    try
+                    {
+                        result = await udp.ReceiveAsync(stoppingToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+
+                    var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
+                    if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var tunnelSnapshot = tunnelState.GetSnapshot();
+                    var upnpSnapshot = upnpState.GetSnapshot();
+                    var payload = JsonSerializer.Serialize(new
+                    {
+                        port = AppConstants.ServerPort,
+                        token = TokenHelper.GetConfiguredToken(),
+                        ips = NetworkHelper.GetLocalIps(),
+                        tunnelUrl = tunnelSnapshot.Url,
+                        externalUrl = upnpSnapshot.ExternalUrl,
+                    });
+
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
+                    await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
+                }
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-
-            var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
-            if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
+            catch (SocketException ex)
             {
-                continue;
+                logger.LogWarning(ex, "Failed to bind UDP discovery listener on port {Port}. Retrying.", AppConstants.DiscoveryPort);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Discovery listener failed unexpectedly. Retrying.");
             }
 
-            var tunnelSnapshot = tunnelState.GetSnapshot();
-            var upnpSnapshot = upnpState.GetSnapshot();
-            var payload = JsonSerializer.Serialize(new
+            try
             {
-                port = AppConstants.ServerPort,
-                token = TokenHelper.GetConfiguredToken(),
-                ips = NetworkHelper.GetLocalIps(),
-                tunnelUrl = tunnelSnapshot.Url,
-                externalUrl = upnpSnapshot.ExternalUrl,
-            });
-
-            var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
-            await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
+                await Task.Delay(RetryDelay, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
         }
     }
 }
