@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 data class UiState(
     val host: String = "",
@@ -39,6 +40,33 @@ class MainViewModel(
 
     fun updateHost(v: String) { _ui.value = _ui.value.copy(host = v) }
     fun updateCode(v: String) { _ui.value = _ui.value.copy(code = v) }
+
+    fun autoConnect() {
+        viewModelScope.launch {
+            val host = normalize(_ui.value.host)
+            if (host == null) {
+                _ui.value = _ui.value.copy(statusText = "Невірний host")
+                return@launch
+            }
+
+            _ui.value = _ui.value.copy(statusText = "Автопідключення: запит pairing code...")
+            repo.autoPair(host, "android-auto")
+                .onSuccess { token ->
+                    secureStore.saveServer(host, token, "My PC")
+                    _ui.value = _ui.value.copy(
+                        token = token,
+                        paired = true,
+                        host = host,
+                        statusText = "Автопідключення успішне",
+                    )
+                    delay(300)
+                    loadStatus()
+                }
+                .onFailure { err ->
+                    _ui.value = _ui.value.copy(statusText = "Автопідключення помилка: ${err.message}")
+                }
+        }
+    }
 
     fun pair() {
         viewModelScope.launch {

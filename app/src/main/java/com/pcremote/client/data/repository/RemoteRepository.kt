@@ -7,6 +7,18 @@ import com.pcremote.client.domain.model.StatusResponse
 import java.util.UUID
 
 class RemoteRepository {
+    suspend fun requestPairingCode(baseUrl: String): Result<String> = runCatching {
+        val api = ApiFactory.create(baseUrl)
+        val response = api.pairingCode()
+        if (!response.isSuccessful) error("Pairing code failed: ${response.code()}")
+        response.body()?.value ?: error("Pairing code missing")
+    }
+
+    suspend fun autoPair(baseUrl: String, clientName: String): Result<String> = runCatching {
+        val code = requestPairingCode(baseUrl).getOrThrow()
+        pair(baseUrl, code, clientName).getOrThrow()
+    }
+
     suspend fun pair(baseUrl: String, code: String, clientName: String): Result<String> = runCatching {
         val api = ApiFactory.create(baseUrl)
         val response = api.pair(PairingRequest(code, clientName))

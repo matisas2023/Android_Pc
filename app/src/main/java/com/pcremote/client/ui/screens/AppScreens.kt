@@ -23,6 +23,11 @@ import com.pcremote.client.ui.viewmodel.MainViewModel
 @Composable
 fun RootScreen(vm: MainViewModel) {
     val ui by vm.ui.collectAsState()
+    if (!ui.paired && ui.host.isNotBlank()) {
+        androidx.compose.runtime.LaunchedEffect(ui.host) {
+            vm.autoConnect()
+        }
+    }
     if (!ui.paired) {
         PairingScreen(
             host = ui.host,
@@ -31,6 +36,7 @@ fun RootScreen(vm: MainViewModel) {
             onHostChange = vm::updateHost,
             onCodeChange = vm::updateCode,
             onPair = vm::pair,
+            onAutoPair = vm::autoConnect,
         )
     } else {
         DashboardScreen(vm)
@@ -45,6 +51,7 @@ fun PairingScreen(
     onHostChange: (String) -> Unit,
     onCodeChange: (String) -> Unit,
     onPair: () -> Unit,
+    onAutoPair: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -56,6 +63,7 @@ fun PairingScreen(
         OutlinedTextField(value = host, onValueChange = onHostChange, label = { Text("Server IP:port") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = code, onValueChange = onCodeChange, label = { Text("Pairing code") }, modifier = Modifier.fillMaxWidth())
         Button(onClick = onPair, modifier = Modifier.fillMaxWidth()) { Text("Pair") }
+        Button(onClick = onAutoPair, modifier = Modifier.fillMaxWidth()) { Text("Автопідключення") }
         if (status.isNotBlank()) Text(status)
     }
 }

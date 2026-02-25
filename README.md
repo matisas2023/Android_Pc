@@ -36,8 +36,8 @@ On startup server prints rotating pairing code in console.
 ## Pair from Android
 1. Launch Android app.
 2. Enter server `IP:port` (example `192.168.1.10:8000`).
-3. Enter pairing code shown on server console.
-4. Tap **Pair**.
+3. For automatic connection tap **Автопідключення** (app requests pairing code and pairs automatically).
+4. Or enter pairing code shown on server console and tap **Pair**.
 5. After pairing, open dashboard and run connectivity/status.
 
 ## Security defaults
