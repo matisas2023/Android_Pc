@@ -29,8 +29,5 @@ class MainActivity : ComponentActivity() {
                 RootScreen(vm)
             }
         }
-        composable(Routes.Priority.route) {
-            PriorityControlScreen(settingsRepository = settingsRepository, onBack = { navController.popBackStack() })
-        }
     }
 }
