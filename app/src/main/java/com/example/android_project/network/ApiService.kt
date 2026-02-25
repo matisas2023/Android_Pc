@@ -6,6 +6,7 @@ import retrofit2.http.GET
 import retrofit2.http.Body
 import retrofit2.http.POST
 import retrofit2.http.Path
+import retrofit2.http.Query
 
 interface ApiService {
     @POST("auth")
@@ -36,7 +37,10 @@ interface ApiService {
     suspend fun screenshot(): Response<ResponseBody>
 
     @GET("camera/photo")
-    suspend fun cameraPhoto(): Response<ResponseBody>
+    suspend fun cameraPhoto(
+        @Query("device_index") deviceIndex: Int = 0,
+        @Query("quality") quality: Int = 90,
+    ): Response<ResponseBody>
 
     @POST("session/start")
     suspend fun sessionStart(@Body request: SessionStartRequest): Response<SessionStartResponse>

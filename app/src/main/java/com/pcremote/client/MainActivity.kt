@@ -1,4 +1,4 @@
-package com.example.android_project
+package com.pcremote.client
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -19,12 +19,7 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             val container = remember { AppContainer(applicationContext) }
-            val vm: MainViewModel = viewModel(
-                factory = MainViewModelFactory(
-                    container.remoteRepository,
-                    container.secureStore,
-                ),
-            )
+            val vm: MainViewModel = viewModel(factory = MainViewModelFactory(container.remoteRepository, container.secureStore))
             Surface(color = MaterialTheme.colorScheme.background) {
                 RootScreen(vm)
             }

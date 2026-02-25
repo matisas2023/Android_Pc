@@ -104,9 +104,13 @@ fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                     }.onSuccess { response ->
                                         if (response.isSuccessful) {
                                             val body = response.body()
-                                            sessionId = body?.sessionId.orEmpty()
-                                            expiresAt = body?.expiresAt.orEmpty()
-                                            statusMessage = "Сесію створено"
+                                            sessionId = body?.sessionId ?: body?.sessionIdSnake.orEmpty()
+                                            expiresAt = body?.expiresAt ?: body?.expiresAtSnake.orEmpty()
+                                            statusMessage = if (sessionId.isNotBlank()) {
+                                                "Сесію створено"
+                                            } else {
+                                                "Сервер повернув некоректну відповідь сесії"
+                                            }
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
                                         }
@@ -135,8 +139,13 @@ fun SessionScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                     runCatching { api.sessionHeartbeat(SessionHeartbeatRequest(sessionId)) }
                                         .onSuccess { response ->
                                             if (response.isSuccessful) {
-                                                expiresAt = response.body()?.expiresAt.orEmpty()
-                                                statusMessage = "Сесію продовжено"
+                                                val body = response.body()
+                                                expiresAt = body?.expiresAt ?: body?.expiresAtSnake.orEmpty()
+                                                statusMessage = if (expiresAt.isNotBlank()) {
+                                                    "Сесію продовжено"
+                                                } else {
+                                                    "Heartbeat виконано"
+                                                }
                                             } else {
                                                 statusMessage = "Помилка: ${response.code()}"
                                             }
