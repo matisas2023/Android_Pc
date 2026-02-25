@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.android_project"
+    namespace = "com.pcremote.client"
     compileSdk {
         version = release(36)
     }
 
     defaultConfig {
-        applicationId = "com.example.android_project"
+        applicationId = "com.pcremote.client"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
@@ -49,6 +49,7 @@ dependencies {
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.datastore.preferences)
+    implementation("androidx.security:security-crypto:1.1.0-alpha06")
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.retrofit)
     implementation(libs.retrofit.converter.moshi)
