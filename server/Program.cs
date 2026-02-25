@@ -226,8 +226,13 @@ app.MapGet("/screen/stream", async (HttpContext context, int fps = 5) =>
     }
 });
 
-app.MapGet("/camera/stream", async (HttpContext context, CameraCaptureService camera, int fps = 10, int quality = 80, int device_index = 0) =>
+app.MapGet("/camera/stream", async Task<IResult> (HttpContext context, CameraCaptureService camera, int fps = 10, int quality = 80, int device_index = 0) =>
 {
+    if (!camera.IsAvailable(device_index))
+    {
+        return Results.Problem("Camera not available.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    }
+
     context.Response.ContentType = $"multipart/x-mixed-replace; boundary={AppConstants.StreamBoundary}";
 
     await foreach (var frame in camera.StreamFrames(device_index, fps, quality, context.RequestAborted))
@@ -240,6 +245,8 @@ app.MapGet("/camera/stream", async (HttpContext context, CameraCaptureService ca
         await context.Response.Body.WriteAsync(frame, context.RequestAborted);
         await context.Response.Body.FlushAsync(context.RequestAborted);
     }
+
+    return Results.Empty;
 });
 
 app.MapGet("/camera/photo", (CameraCaptureService camera, int device_index = 0, int quality = 90) =>
@@ -1034,6 +1041,27 @@ sealed class CameraCaptureService
 {
     private readonly object _captureLock = new();
 
+    public bool IsAvailable(int deviceIndex)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        lock (_captureLock)
+        {
+            try
+            {
+                using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
+                return capture.IsOpened();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+    }
+
     public byte[]? CaptureJpeg(int deviceIndex, int quality)
     {
         if (!OperatingSystem.IsWindows())
@@ -1044,21 +1072,28 @@ sealed class CameraCaptureService
         var safeQuality = Math.Clamp(quality, 30, 95);
         lock (_captureLock)
         {
-            using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
-            if (!capture.IsOpened())
+            try
+            {
+                using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
+                if (!capture.IsOpened())
+                {
+                    return null;
+                }
+
+                using var frame = new Mat();
+                if (!capture.Read(frame) || frame.Empty())
+                {
+                    return null;
+                }
+
+                return Cv2.ImEncode(".jpg", frame, out var jpeg, new[] { (int)ImwriteFlags.JpegQuality, safeQuality })
+                    ? jpeg
+                    : null;
+            }
+            catch
             {
                 return null;
             }
-
-            using var frame = new Mat();
-            if (!capture.Read(frame) || frame.Empty())
-            {
-                return null;
-            }
-
-            return Cv2.ImEncode(".jpg", frame, out var jpeg, new[] { (int)ImwriteFlags.JpegQuality, safeQuality })
-                ? jpeg
-                : null;
         }
     }
 
@@ -1077,46 +1112,65 @@ sealed class CameraCaptureService
         quality = Math.Clamp(quality, 30, 95);
         var delay = TimeSpan.FromSeconds(1.0 / fps);
 
-        using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
-        if (!capture.IsOpened())
+        VideoCapture? capture;
+        try
+        {
+            capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
+        }
+        catch
         {
             yield break;
         }
 
-        using var frame = new Mat();
-
-        while (!token.IsCancellationRequested)
+        using (capture)
         {
-            byte[]? jpeg = null;
-            if (capture.Read(frame) && !frame.Empty())
-            {
-                jpeg = Cv2.ImEncode(".jpg", frame, out var encoded, new[] { (int)ImwriteFlags.JpegQuality, quality })
-                    ? encoded
-                    : null;
-            }
-
-            if (jpeg != null)
-            {
-                var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/jpeg\r\n\r\n";
-                var footer = "\r\n";
-                var headerBytes = System.Text.Encoding.UTF8.GetBytes(header);
-                var footerBytes = System.Text.Encoding.UTF8.GetBytes(footer);
-
-                var payload = new byte[headerBytes.Length + jpeg.Length + footerBytes.Length];
-                Buffer.BlockCopy(headerBytes, 0, payload, 0, headerBytes.Length);
-                Buffer.BlockCopy(jpeg, 0, payload, headerBytes.Length, jpeg.Length);
-                Buffer.BlockCopy(footerBytes, 0, payload, headerBytes.Length + jpeg.Length, footerBytes.Length);
-
-                yield return payload;
-            }
-
-            try
-            {
-                await Task.Delay(delay, token);
-            }
-            catch (TaskCanceledException)
+            if (!capture.IsOpened())
             {
                 yield break;
+            }
+
+            using var frame = new Mat();
+
+            while (!token.IsCancellationRequested)
+            {
+                byte[]? jpeg = null;
+                try
+                {
+                    if (capture.Read(frame) && !frame.Empty())
+                    {
+                        jpeg = Cv2.ImEncode(".jpg", frame, out var encoded, new[] { (int)ImwriteFlags.JpegQuality, quality })
+                            ? encoded
+                            : null;
+                    }
+                }
+                catch
+                {
+                    yield break;
+                }
+
+                if (jpeg != null)
+                {
+                    var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/jpeg\r\n\r\n";
+                    var footer = "\r\n";
+                    var headerBytes = System.Text.Encoding.UTF8.GetBytes(header);
+                    var footerBytes = System.Text.Encoding.UTF8.GetBytes(footer);
+
+                    var payload = new byte[headerBytes.Length + jpeg.Length + footerBytes.Length];
+                    Buffer.BlockCopy(headerBytes, 0, payload, 0, headerBytes.Length);
+                    Buffer.BlockCopy(jpeg, 0, payload, headerBytes.Length, jpeg.Length);
+                    Buffer.BlockCopy(footerBytes, 0, payload, headerBytes.Length + jpeg.Length, footerBytes.Length);
+
+                    yield return payload;
+                }
+
+                try
+                {
+                    await Task.Delay(delay, token);
+                }
+                catch (TaskCanceledException)
+                {
+                    yield break;
+                }
             }
         }
     }
@@ -1602,7 +1656,19 @@ sealed class MetricsStore
     private readonly object _lock = new();
     private MetricsSnapshot _snapshot = MetricsSnapshot.Empty;
     private NetworkSample? _previousNetwork;
-    private readonly PerformanceCounter _cpuCounter = new("Processor", "% Processor Time", "_Total");
+    private readonly PerformanceCounter? _cpuCounter;
+
+    public MetricsStore()
+    {
+        try
+        {
+            _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
+        }
+        catch
+        {
+            _cpuCounter = null;
+        }
+    }
 
     public MetricsSnapshot GetSnapshot()
     {
@@ -1667,6 +1733,10 @@ sealed class MetricsStore
     {
         try
         {
+            if (_cpuCounter == null)
+            {
+                return 0;
+            }
             _ = _cpuCounter.NextValue();
             Thread.Sleep(100);
             return Math.Round(_cpuCounter.NextValue(), 2);

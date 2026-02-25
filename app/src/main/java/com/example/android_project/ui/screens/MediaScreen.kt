@@ -237,8 +237,13 @@ fun MediaScreen(settingsRepository: SettingsRepository, onBack: () -> Unit) {
                                         )
                                     }.onSuccess { response ->
                                         if (response.isSuccessful) {
-                                            recordingId = response.body()?.recordingId.orEmpty()
-                                            statusMessage = "Запис запущено"
+                                            val body = response.body()
+                                            recordingId = body?.recordingId ?: body?.recordingIdSnake.orEmpty()
+                                            statusMessage = if (recordingId.isNotBlank()) {
+                                                "Запис запущено"
+                                            } else {
+                                                "Сервер не повернув recording_id"
+                                            }
                                         } else {
                                             statusMessage = "Помилка: ${response.code()}"
                                         }
