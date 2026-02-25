@@ -200,7 +200,7 @@ static void Audit(HttpContext ctx, string command, string summary, string result
     Log.Information("audit command={Command} summary={Summary} result={Result} client={Client}", command, summary, result, ctx.Connection.RemoteIpAddress?.ToString());
 }
 
-record PairingCode(string Value, DateTimeOffset ExpiresAtUtc);
+public record PairingCode(string Value, DateTimeOffset ExpiresAtUtc);
 record PairingRequest(string Code, string? ClientName);
 record PairingResponse(string Token, DateTimeOffset ExpiresAtUtc);
 record PowerRequest(string Action);
