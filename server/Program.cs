@@ -12,6 +12,7 @@ using System.Linq;
 using Microsoft.AspNetCore.Http.Json;
 using System.Text.RegularExpressions;
 using Open.Nat;
+using OpenCvSharp;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -26,6 +27,7 @@ builder.Services.AddSingleton<RecordingStore>();
 builder.Services.AddSingleton<MetricsStore>();
 builder.Services.AddSingleton<TunnelState>();
 builder.Services.AddSingleton<UpnpState>();
+builder.Services.AddSingleton<CameraCaptureService>();
 builder.Services.AddHostedService<DiscoveryService>();
 builder.Services.AddHostedService<SessionSweepService>();
 builder.Services.AddHostedService<MetricsSamplingService>();
@@ -224,14 +226,28 @@ app.MapGet("/screen/stream", async (HttpContext context, int fps = 5) =>
     }
 });
 
-app.MapGet("/camera/stream", () =>
+app.MapGet("/camera/stream", async (HttpContext context, CameraCaptureService camera, int fps = 10, int quality = 80, int device_index = 0) =>
 {
-    return Results.Problem("Camera streaming requires additional setup.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    context.Response.ContentType = $"multipart/x-mixed-replace; boundary={AppConstants.StreamBoundary}";
+
+    await foreach (var frame in camera.StreamFrames(device_index, fps, quality, context.RequestAborted))
+    {
+        if (context.RequestAborted.IsCancellationRequested)
+        {
+            break;
+        }
+
+        await context.Response.Body.WriteAsync(frame, context.RequestAborted);
+        await context.Response.Body.FlushAsync(context.RequestAborted);
+    }
 });
 
-app.MapGet("/camera/photo", () =>
+app.MapGet("/camera/photo", (CameraCaptureService camera, int device_index = 0, int quality = 90) =>
 {
-    return Results.Problem("Camera capture requires additional setup.", statusCode: StatusCodes.Status503ServiceUnavailable);
+    var jpeg = camera.CaptureJpeg(device_index, quality);
+    return jpeg == null
+        ? Results.Problem("Camera not available.", statusCode: StatusCodes.Status503ServiceUnavailable)
+        : Results.Bytes(jpeg, "image/jpeg");
 });
 
 app.MapPost("/screen/record/start", (ScreenRecordStartRequest request, RecordingStore recordings) =>
@@ -449,43 +465,72 @@ sealed class DiscoveryService(
     TunnelState tunnelState,
     UpnpState upnpState) : BackgroundService
 {
+    private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(15);
+
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        using var udp = new UdpClient(AppConstants.DiscoveryPort);
-        udp.EnableBroadcast = true;
-        logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
-
         while (!stoppingToken.IsCancellationRequested)
         {
-            UdpReceiveResult result;
             try
             {
-                result = await udp.ReceiveAsync(stoppingToken);
+                using var udp = new UdpClient(new IPEndPoint(IPAddress.Any, AppConstants.DiscoveryPort));
+                udp.EnableBroadcast = true;
+                logger.LogInformation("Discovery listener started on UDP {Port}", AppConstants.DiscoveryPort);
+
+                while (!stoppingToken.IsCancellationRequested)
+                {
+                    UdpReceiveResult result;
+                    try
+                    {
+                        result = await udp.ReceiveAsync(stoppingToken);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        return;
+                    }
+
+                    var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
+                    if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
+                    {
+                        continue;
+                    }
+
+                    var tunnelSnapshot = tunnelState.GetSnapshot();
+                    var upnpSnapshot = upnpState.GetSnapshot();
+                    var payload = JsonSerializer.Serialize(new
+                    {
+                        port = AppConstants.ServerPort,
+                        token = TokenHelper.GetConfiguredToken(),
+                        ips = NetworkHelper.GetLocalIps(),
+                        tunnelUrl = tunnelSnapshot.Url,
+                        externalUrl = upnpSnapshot.ExternalUrl,
+                    });
+
+                    var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
+                    await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
+                }
             }
             catch (OperationCanceledException)
             {
                 break;
             }
-
-            var message = System.Text.Encoding.UTF8.GetString(result.Buffer).Trim();
-            if (!string.Equals(message, AppConstants.DiscoveryMessage, StringComparison.Ordinal))
+            catch (SocketException ex)
             {
-                continue;
+                logger.LogWarning(ex, "Failed to bind UDP discovery listener on port {Port}. Retrying.", AppConstants.DiscoveryPort);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Discovery listener failed unexpectedly. Retrying.");
             }
 
-            var tunnelSnapshot = tunnelState.GetSnapshot();
-            var upnpSnapshot = upnpState.GetSnapshot();
-            var payload = JsonSerializer.Serialize(new
+            try
             {
-                port = AppConstants.ServerPort,
-                token = TokenHelper.GetConfiguredToken(),
-                ips = NetworkHelper.GetLocalIps(),
-                tunnelUrl = tunnelSnapshot.Url,
-                externalUrl = upnpSnapshot.ExternalUrl,
-            });
-
-            var bytes = System.Text.Encoding.UTF8.GetBytes(payload);
-            await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
+                await Task.Delay(RetryDelay, stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
         }
     }
 }
@@ -982,6 +1027,98 @@ static class ScreenCapture
         using var graphics = System.Drawing.Graphics.FromImage(bitmap);
         graphics.CopyFromScreen(bounds.Left, bounds.Top, 0, 0, bounds.Size);
         return bitmap;
+    }
+}
+
+sealed class CameraCaptureService
+{
+    private readonly object _captureLock = new();
+
+    public byte[]? CaptureJpeg(int deviceIndex, int quality)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        var safeQuality = Math.Clamp(quality, 30, 95);
+        lock (_captureLock)
+        {
+            using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
+            if (!capture.IsOpened())
+            {
+                return null;
+            }
+
+            using var frame = new Mat();
+            if (!capture.Read(frame) || frame.Empty())
+            {
+                return null;
+            }
+
+            return Cv2.ImEncode(".jpg", frame, out var jpeg, new[] { (int)ImwriteFlags.JpegQuality, safeQuality })
+                ? jpeg
+                : null;
+        }
+    }
+
+    public async IAsyncEnumerable<byte[]> StreamFrames(
+        int deviceIndex,
+        int fps,
+        int quality,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken token)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            yield break;
+        }
+
+        fps = Math.Clamp(fps, 1, 30);
+        quality = Math.Clamp(quality, 30, 95);
+        var delay = TimeSpan.FromSeconds(1.0 / fps);
+
+        using var capture = new VideoCapture(deviceIndex, VideoCaptureAPIs.DSHOW);
+        if (!capture.IsOpened())
+        {
+            yield break;
+        }
+
+        using var frame = new Mat();
+
+        while (!token.IsCancellationRequested)
+        {
+            byte[]? jpeg = null;
+            if (capture.Read(frame) && !frame.Empty())
+            {
+                jpeg = Cv2.ImEncode(".jpg", frame, out var encoded, new[] { (int)ImwriteFlags.JpegQuality, quality })
+                    ? encoded
+                    : null;
+            }
+
+            if (jpeg != null)
+            {
+                var header = $"--{AppConstants.StreamBoundary}\r\nContent-Type: image/jpeg\r\n\r\n";
+                var footer = "\r\n";
+                var headerBytes = System.Text.Encoding.UTF8.GetBytes(header);
+                var footerBytes = System.Text.Encoding.UTF8.GetBytes(footer);
+
+                var payload = new byte[headerBytes.Length + jpeg.Length + footerBytes.Length];
+                Buffer.BlockCopy(headerBytes, 0, payload, 0, headerBytes.Length);
+                Buffer.BlockCopy(jpeg, 0, payload, headerBytes.Length, jpeg.Length);
+                Buffer.BlockCopy(footerBytes, 0, payload, headerBytes.Length + jpeg.Length, footerBytes.Length);
+
+                yield return payload;
+            }
+
+            try
+            {
+                await Task.Delay(delay, token);
+            }
+            catch (TaskCanceledException)
+            {
+                yield break;
+            }
+        }
     }
 }
 
