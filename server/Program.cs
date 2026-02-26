@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -262,7 +261,7 @@ public sealed class SecurityState
 
 sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public bool Power(string action)
     {
         state.RotateCode();
         while (!stoppingToken.IsCancellationRequested)
@@ -272,7 +271,10 @@ sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
             if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
                 state.RotateCode();
         }
+        catch { return false; }
     }
+
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
 }
 
 sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
@@ -480,6 +482,13 @@ sealed class ScreenService : IScreenService
         bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
         return ms.ToArray();
     }
+}
+
+interface IClipboardService { string? ReadText(); void WriteText(string text); }
+sealed class ClipboardService : IClipboardService
+{
+    public string? ReadText() => RunSta(() => Clipboard.ContainsText() ? Clipboard.GetText() : null);
+    public void WriteText(string text) => RunSta(() => Clipboard.SetText(text));
 
     public byte[]? CaptureCameraJpeg()
     {
