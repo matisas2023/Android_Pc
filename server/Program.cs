@@ -5,6 +5,7 @@ using System.Net.NetworkInformation;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -306,7 +307,7 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
                 continue;
             }
 
-            var payload = System.Text.Json.JsonSerializer.Serialize(new
+            var payload = JsonSerializer.Serialize(new
             {
                 port = ResolveServerPort(),
                 ips = GetLocalIps(),
@@ -336,7 +337,6 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
             .Distinct()
             .ToList();
     }
-}
 
 public sealed class ReplayProtectionService
 {
