@@ -375,7 +375,6 @@ public sealed class ReplayProtectionService
 
         return true;
     }
-}
 
 interface IStatusService { object GetStatus(); }
 sealed class StatusService : IStatusService
@@ -482,13 +481,6 @@ sealed class ScreenService : IScreenService
         bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
         return ms.ToArray();
     }
-}
-
-interface IClipboardService { string? ReadText(); void WriteText(string text); }
-sealed class ClipboardService : IClipboardService
-{
-    public string? ReadText() => RunSta(() => Clipboard.ContainsText() ? Clipboard.GetText() : null);
-    public void WriteText(string text) => RunSta(() => Clipboard.SetText(text));
 
     public byte[]? CaptureCameraJpeg()
     {
