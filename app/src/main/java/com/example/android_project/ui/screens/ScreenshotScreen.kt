@@ -55,10 +55,16 @@ fun ScreenshotScreen(settingsRepository: SettingsRepository, onBack: () -> Unit)
                     runCatching { api.screenshot() }
                         .onSuccess { response ->
                             if (response.isSuccessful) {
-                                val bytes = response.body()?.bytes() ?: ByteArray(0)
-                                val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                                val body = response.body()
+                                val bytes = body?.bytes() ?: ByteArray(0)
+                                val contentType = body?.contentType()?.toString().orEmpty()
+                                val bitmap = decodeBitmapSafely(bytes)
                                 imageBitmap = bitmap?.asImageBitmap()
-                                status = if (bitmap != null) "Готово" else "Не вдалося декодувати"
+                                status = if (bitmap != null) {
+                                    "Готово"
+                                } else {
+                                    "Не вдалося декодувати зображення (${contentType.ifBlank { "unknown" }})"
+                                }
                             } else {
                                 status = "Помилка: ${response.code()}"
                             }
@@ -87,4 +93,9 @@ fun ScreenshotScreen(settingsRepository: SettingsRepository, onBack: () -> Unit)
             Text(text = status, style = MaterialTheme.typography.bodyMedium)
         }
     }
+}
+
+private fun decodeBitmapSafely(bytes: ByteArray): android.graphics.Bitmap? {
+    if (bytes.isEmpty()) return null
+    return runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size) }.getOrNull()
 }
