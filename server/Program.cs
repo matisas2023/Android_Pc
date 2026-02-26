@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -258,7 +257,6 @@ public sealed class SecurityState
         if (!_tokens.TryGetValue(token, out var exp)) return false;
         return exp > DateTimeOffset.UtcNow;
     }
-}
 
 sealed class PairingCodeRotationService : BackgroundService
 {
@@ -279,7 +277,10 @@ sealed class PairingCodeRotationService : BackgroundService
             if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
                 _state.RotateCode();
         }
+        catch { return false; }
     }
+
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
 }
 
 sealed class DiscoveryService : BackgroundService
@@ -566,6 +567,7 @@ sealed class FileService : IFileService
             return new FileEntryDto(f.Name, f.FullName, isDir, size);
         }).ToList();
     }
+}
 
     public bool CreateFolder(string path) { try { Directory.CreateDirectory(path); return true; } catch { return false; } }
     public bool Rename(string src, string dst)
