@@ -7,7 +7,6 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
 using Serilog;
 using System.Windows.Forms;
@@ -110,7 +109,7 @@ app.Use(async (ctx, next) =>
 app.MapGet("/", () => Results.Ok(new { name = "RemoteControl.Server", version = "v2" }));
 app.MapGet("/health", () => Results.Ok(new { status = "ok" }));
 
-app.MapGet("/api/v1/pairing/code", ([FromServices] SecurityState sec, HttpContext ctx) =>
+app.MapGet("/api/v1/pairing/code", (SecurityState sec, HttpContext ctx) =>
 {
     if (!IsLocalRequest(ctx.Connection.RemoteIpAddress))
     {
@@ -121,7 +120,7 @@ app.MapGet("/api/v1/pairing/code", ([FromServices] SecurityState sec, HttpContex
     return Results.Ok(new { code.Value, code.ExpiresAtUtc });
 });
 
-app.MapPost("/api/v1/pairing/pair", ([FromBody] PairingRequest req, [FromServices] SecurityState sec) =>
+app.MapPost("/api/v1/pairing/pair", (PairingRequest req, SecurityState sec) =>
 {
     if (!sec.TryPair(req.Code, req.ClientName ?? "android", out var token))
     {
@@ -131,41 +130,41 @@ app.MapPost("/api/v1/pairing/pair", ([FromBody] PairingRequest req, [FromService
     return Results.Ok(new PairingResponse(token!, DateTimeOffset.UtcNow.AddDays(30)));
 });
 
-app.MapGet("/api/v1/status", ([FromServices] IStatusService status) => Results.Ok(status.GetStatus()))
+app.MapGet("/api/v1/status", (IStatusService status) => Results.Ok(status.GetStatus()))
     .RequireRateLimiting("default");
 
-app.MapPost("/api/v1/system/power", ([FromBody] PowerRequest req, [FromServices] ISystemService system, HttpContext ctx) =>
+app.MapPost("/api/v1/system/power", (PowerRequest req, ISystemService system, HttpContext ctx) =>
 {
     var ok = system.Power(req.Action);
     Audit(ctx, "system.power", req.Action, ok ? "ok" : "fail");
     return ok ? Results.Ok(new { status = "ok" }) : Results.BadRequest(new { detail = "unsupported action" });
 });
 
-app.MapGet("/api/v1/screen/screenshot", ([FromServices] IScreenService screen) =>
+app.MapGet("/api/v1/screen/screenshot", (IScreenService screen) =>
 {
     var bytes = screen.CapturePng();
     return Results.Bytes(bytes, "image/png");
 });
 
-app.MapGet("/api/v1/camera/photo", ([FromServices] IScreenService screen) =>
+app.MapGet("/api/v1/camera/photo", (IScreenService screen) =>
 {
     var bytes = screen.CaptureCameraJpeg();
     return bytes == null ? Results.Problem("Camera not available", statusCode: 503) : Results.Bytes(bytes, "image/jpeg");
 });
 
-app.MapGet("/api/v1/processes", ([FromServices] IProcessService svc) => Results.Ok(svc.List()));
-app.MapPost("/api/v1/processes/{pid:int}/kill", (int pid, [FromQuery] bool confirm, [FromServices] IProcessService svc) =>
+app.MapGet("/api/v1/processes", (IProcessService svc) => Results.Ok(svc.List()));
+app.MapPost("/api/v1/processes/{pid:int}/kill", (int pid, bool confirm, IProcessService svc) =>
 {
     if (!confirm) return Results.BadRequest(new { detail = "confirm=true required" });
     return svc.Kill(pid) ? Results.Ok(new { status = "ok" }) : Results.NotFound();
 });
 
-app.MapGet("/api/v1/files/list", ([FromQuery] string path, [FromServices] IFileService files) => Results.Ok(files.List(path)));
-app.MapPost("/api/v1/files/folder", ([FromBody] CreateFolderRequest req, [FromServices] IFileService files) => Results.Ok(files.CreateFolder(req.Path)));
-app.MapPost("/api/v1/files/rename", ([FromBody] RenameRequest req, [FromServices] IFileService files) => Results.Ok(files.Rename(req.Source, req.Target)));
-app.MapDelete("/api/v1/files", ([FromQuery] string path, [FromServices] IFileService files) => Results.Ok(files.Delete(path)));
-app.MapGet("/api/v1/files/download", ([FromQuery] string path) => Results.File(path, "application/octet-stream", Path.GetFileName(path)));
-app.MapPost("/api/v1/files/upload", async ([FromQuery] string targetDir, HttpRequest req, [FromServices] IFileService files) =>
+app.MapGet("/api/v1/files/list", (string path, IFileService files) => Results.Ok(files.List(path)));
+app.MapPost("/api/v1/files/folder", (CreateFolderRequest req, IFileService files) => Results.Ok(files.CreateFolder(req.Path)));
+app.MapPost("/api/v1/files/rename", (RenameRequest req, IFileService files) => Results.Ok(files.Rename(req.Source, req.Target)));
+app.MapDelete("/api/v1/files", (string path, IFileService files) => Results.Ok(files.Delete(path)));
+app.MapGet("/api/v1/files/download", (string path) => Results.File(path, "application/octet-stream", Path.GetFileName(path)));
+app.MapPost("/api/v1/files/upload", async (string targetDir, HttpRequest req, IFileService files) =>
 {
     var form = await req.ReadFormAsync();
     var file = form.Files.FirstOrDefault();
@@ -174,24 +173,24 @@ app.MapPost("/api/v1/files/upload", async ([FromQuery] string targetDir, HttpReq
     return Results.Ok(new { saved });
 });
 
-app.MapGet("/api/v1/clipboard", ([FromServices] IClipboardService cb) => Results.Ok(new { text = cb.ReadText() }));
-app.MapPost("/api/v1/clipboard", ([FromBody] ClipboardWriteRequest req, [FromServices] IClipboardService cb) =>
+app.MapGet("/api/v1/clipboard", (IClipboardService cb) => Results.Ok(new { text = cb.ReadText() }));
+app.MapPost("/api/v1/clipboard", (ClipboardWriteRequest req, IClipboardService cb) =>
 {
     cb.WriteText(req.Text);
     return Results.Ok(new { status = "ok" });
 });
 
-app.MapPost("/api/v1/media", ([FromBody] MediaRequest req, [FromServices] IMediaService media) =>
+app.MapPost("/api/v1/media", (MediaRequest req, IMediaService media) =>
 {
     var ok = media.Execute(req.Action);
     return ok ? Results.Ok(new { status = "ok" }) : Results.BadRequest();
 });
 
-app.MapPost("/api/v1/input/mouse/move", ([FromBody] MouseMoveRequest req, [FromServices] IInputService input) => { input.MoveMouse(req.Dx, req.Dy); return Results.Ok(); });
-app.MapPost("/api/v1/input/mouse/click", ([FromBody] MouseClickRequest req, [FromServices] IInputService input) => { input.Click(req.Button, req.Double); return Results.Ok(); });
-app.MapPost("/api/v1/input/mouse/scroll", ([FromBody] MouseScrollRequest req, [FromServices] IInputService input) => { input.Scroll(req.Delta); return Results.Ok(); });
-app.MapPost("/api/v1/input/keyboard/text", ([FromBody] KeyboardTextRequest req, [FromServices] IInputService input) => { input.TypeText(req.Text); return Results.Ok(); });
-app.MapPost("/api/v1/input/keyboard/hotkey", ([FromBody] HotkeyRequest req, [FromServices] IInputService input) => { input.Hotkey(req.Keys); return Results.Ok(); });
+app.MapPost("/api/v1/input/mouse/move", (MouseMoveRequest req, IInputService input) => { input.MoveMouse(req.Dx, req.Dy); return Results.Ok(); });
+app.MapPost("/api/v1/input/mouse/click", (MouseClickRequest req, IInputService input) => { input.Click(req.Button, req.Double); return Results.Ok(); });
+app.MapPost("/api/v1/input/mouse/scroll", (MouseScrollRequest req, IInputService input) => { input.Scroll(req.Delta); return Results.Ok(); });
+app.MapPost("/api/v1/input/keyboard/text", (KeyboardTextRequest req, IInputService input) => { input.TypeText(req.Text); return Results.Ok(); });
+app.MapPost("/api/v1/input/keyboard/hotkey", (HotkeyRequest req, IInputService input) => { input.Hotkey(req.Keys); return Results.Ok(); });
 
 app.Run();
 
@@ -388,6 +387,7 @@ public sealed class ReplayProtectionService
 
         return true;
     }
+}
 
 interface IStatusService { object GetStatus(); }
 sealed class StatusService : IStatusService
