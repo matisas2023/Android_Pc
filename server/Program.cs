@@ -258,19 +258,25 @@ public sealed class SecurityState
         if (!_tokens.TryGetValue(token, out var exp)) return false;
         return exp > DateTimeOffset.UtcNow;
     }
-}
 
-sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
+sealed class PairingCodeRotationService : BackgroundService
 {
-    public bool Power(string action)
+    private readonly SecurityState _state;
+
+    public PairingCodeRotationService(SecurityState state)
     {
-        state.RotateCode();
+        _state = state;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        _state.RotateCode();
         while (!stoppingToken.IsCancellationRequested)
         {
             await Task.Delay(TimeSpan.FromMinutes(1), stoppingToken);
-            var current = state.GetCurrentPairingCode();
+            var current = _state.GetCurrentPairingCode();
             if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
-                state.RotateCode();
+                _state.RotateCode();
         }
         catch { return false; }
     }
@@ -278,16 +284,22 @@ sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
     [DllImport("user32.dll")] static extern bool LockWorkStation();
 }
 
-sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
+sealed class DiscoveryService : BackgroundService
 {
     private const int DiscoveryPort = 9999;
     private const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
+    private readonly ILogger<DiscoveryService> _logger;
+
+    public DiscoveryService(ILogger<DiscoveryService> logger)
+    {
+        _logger = logger;
+    }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
         using var udp = new UdpClient(DiscoveryPort);
         udp.EnableBroadcast = true;
-        logger.LogInformation("Discovery listener started on UDP {Port}", DiscoveryPort);
+        _logger.LogInformation("Discovery listener started on UDP {Port}", DiscoveryPort);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -337,6 +349,7 @@ sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundServ
             .Distinct()
             .ToList();
     }
+}
 
 public sealed class ReplayProtectionService
 {
@@ -554,6 +567,7 @@ sealed class FileService : IFileService
             return new FileEntryDto(f.Name, f.FullName, isDir, size);
         }).ToList();
     }
+}
 
     public bool CreateFolder(string path) { try { Directory.CreateDirectory(path); return true; } catch { return false; } }
     public bool Rename(string src, string dst)
