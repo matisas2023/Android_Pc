@@ -13,6 +13,11 @@ using System.Windows.Forms;
 
 var builder = WebApplication.CreateBuilder(args);
 
+if (string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("ASPNETCORE_URLS")))
+{
+    builder.WebHost.UseUrls("http://0.0.0.0:8000", "http://[::]:8000");
+}
+
 builder.Host.UseSerilog((ctx, cfg) => cfg
     .MinimumLevel.Information()
     .WriteTo.Console()
@@ -36,6 +41,7 @@ builder.Services.AddSingleton<IProcessService, ProcessService>();
 builder.Services.AddSingleton<IFileService, FileService>();
 builder.Services.AddSingleton<IClipboardService, ClipboardService>();
 builder.Services.AddHostedService<PairingCodeRotationService>();
+builder.Services.AddHostedService<DiscoveryService>();
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -255,7 +261,7 @@ public sealed class SecurityState
 
 sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public bool Power(string action)
     {
         state.RotateCode();
         while (!stoppingToken.IsCancellationRequested)
@@ -265,6 +271,70 @@ sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
             if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
                 state.RotateCode();
         }
+        catch { return false; }
+    }
+
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
+}
+
+sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
+{
+    private const int DiscoveryPort = 9999;
+    private const string DiscoveryMessage = "PC_REMOTE_DISCOVERY";
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        using var udp = new UdpClient(DiscoveryPort);
+        udp.EnableBroadcast = true;
+        logger.LogInformation("Discovery listener started on UDP {Port}", DiscoveryPort);
+
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            UdpReceiveResult result;
+            try
+            {
+                result = await udp.ReceiveAsync(stoppingToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            var message = Encoding.UTF8.GetString(result.Buffer).Trim();
+            if (!string.Equals(message, DiscoveryMessage, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var payload = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                port = ResolveServerPort(),
+                ips = GetLocalIps(),
+            });
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            await udp.SendAsync(bytes, bytes.Length, result.RemoteEndPoint);
+        }
+    }
+
+    private static int ResolveServerPort()
+    {
+        var raw = Environment.GetEnvironmentVariable("ASPNETCORE_URLS");
+        if (string.IsNullOrWhiteSpace(raw)) return 8000;
+
+        var first = raw.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault();
+        if (first == null) return 8000;
+        return Uri.TryCreate(first, UriKind.Absolute, out var uri) ? uri.Port : 8000;
+    }
+
+    private static List<string> GetLocalIps()
+    {
+        return NetworkInterface.GetAllNetworkInterfaces()
+            .Where(n => n.OperationalStatus == OperationalStatus.Up && !n.IsReceiveOnly)
+            .SelectMany(n => n.GetIPProperties().UnicastAddresses)
+            .Where(a => a.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork && !IPAddress.IsLoopback(a.Address))
+            .Select(a => a.Address.ToString())
+            .Distinct()
+            .ToList();
     }
 }
 
@@ -412,6 +482,13 @@ sealed class ScreenService : IScreenService
         bmp.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
         return ms.ToArray();
     }
+}
+
+interface IClipboardService { string? ReadText(); void WriteText(string text); }
+sealed class ClipboardService : IClipboardService
+{
+    public string? ReadText() => RunSta(() => Clipboard.ContainsText() ? Clipboard.GetText() : null);
+    public void WriteText(string text) => RunSta(() => Clipboard.SetText(text));
 
     public byte[]? CaptureCameraJpeg()
     {

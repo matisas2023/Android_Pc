@@ -32,6 +32,7 @@ scripts\start_server.cmd
 ```
 
 On startup server prints rotating pairing code in console.
+Server binds to `http://0.0.0.0:8000` by default (if `ASPNETCORE_URLS` is not set).
 
 ## Pair from Android
 1. Launch Android app.
