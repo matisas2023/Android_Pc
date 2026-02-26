@@ -4,13 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.android_project"
+    namespace = "com.pcremote.client"
     compileSdk {
         version = release(36)
     }
 
     defaultConfig {
-        applicationId = "com.example.android_project"
+        applicationId = "com.pcremote.client"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
