@@ -2,7 +2,6 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Net;
 using System.Net.NetworkInformation;
-using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
@@ -262,7 +261,7 @@ public sealed class SecurityState
 
 sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
 {
-    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    public bool Power(string action)
     {
         state.RotateCode();
         while (!stoppingToken.IsCancellationRequested)
@@ -272,7 +271,10 @@ sealed class PairingCodeRotationService(SecurityState state) : BackgroundService
             if (current.ExpiresAtUtc <= DateTimeOffset.UtcNow)
                 state.RotateCode();
         }
+        catch { return false; }
     }
+
+    [DllImport("user32.dll")] static extern bool LockWorkStation();
 }
 
 sealed class DiscoveryService(ILogger<DiscoveryService> logger) : BackgroundService
@@ -373,7 +375,6 @@ public sealed class ReplayProtectionService
 
         return true;
     }
-}
 
 interface IStatusService { object GetStatus(); }
 sealed class StatusService : IStatusService
