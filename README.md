@@ -35,10 +35,9 @@ On startup server prints rotating pairing code in console.
 
 ## Pair from Android
 1. Launch Android app.
-2. Enter server `IP:port` (example `192.168.1.10:8000`).
-3. For automatic connection tap **Автопідключення** (app requests pairing code and pairs automatically).
-4. Or enter pairing code shown on server console and tap **Pair**.
-5. After pairing, open dashboard and run connectivity/status.
+2. Tap **Підключитися (1 кнопка)**.
+3. App auto-discovers server in LAN (UDP discovery), requests pairing code and pairs automatically.
+4. If autodiscovery fails, use manual fallback (`IP:port` + pairing code).
 
 ## Security defaults
 - Token auth (`Authorization: Bearer <token>`)

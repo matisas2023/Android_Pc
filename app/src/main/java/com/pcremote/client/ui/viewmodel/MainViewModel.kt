@@ -5,6 +5,7 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.pcremote.client.data.api.ServerDiscovery
 import com.pcremote.client.data.repository.RemoteRepository
 import com.pcremote.client.domain.model.StatusResponse
 import com.pcremote.client.security.SecureStore
@@ -40,6 +41,37 @@ class MainViewModel(
 
     fun updateHost(v: String) { _ui.value = _ui.value.copy(host = v) }
     fun updateCode(v: String) { _ui.value = _ui.value.copy(code = v) }
+
+    fun oneTapConnect() {
+        viewModelScope.launch {
+            _ui.value = _ui.value.copy(statusText = "Пошук сервера в мережі...")
+
+            val discovered = ServerDiscovery.discover()
+            if (discovered == null) {
+                _ui.value = _ui.value.copy(statusText = "Сервер не знайдено. Перевірте, що сервер запущений і ви в одній Wi‑Fi мережі")
+                return@launch
+            }
+
+            val host = "http://${discovered.host}:${discovered.port}"
+            _ui.value = _ui.value.copy(host = host, statusText = "Сервер знайдено: $host. Підключення...")
+
+            repo.autoPair(host, "android-auto")
+                .onSuccess { token ->
+                    secureStore.saveServer(host, token, "My PC")
+                    _ui.value = _ui.value.copy(
+                        token = token,
+                        paired = true,
+                        host = host,
+                        statusText = "Підключено",
+                    )
+                    delay(300)
+                    loadStatus()
+                }
+                .onFailure { err ->
+                    _ui.value = _ui.value.copy(statusText = "Не вдалося підключитися: ${err.message}")
+                }
+        }
+    }
 
     fun autoConnect() {
         viewModelScope.launch {

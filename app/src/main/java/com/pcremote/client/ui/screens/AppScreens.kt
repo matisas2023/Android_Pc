@@ -23,11 +23,6 @@ import com.pcremote.client.ui.viewmodel.MainViewModel
 @Composable
 fun RootScreen(vm: MainViewModel) {
     val ui by vm.ui.collectAsState()
-    if (!ui.paired && ui.host.isNotBlank()) {
-        androidx.compose.runtime.LaunchedEffect(ui.host) {
-            vm.autoConnect()
-        }
-    }
     if (!ui.paired) {
         PairingScreen(
             host = ui.host,
@@ -37,6 +32,7 @@ fun RootScreen(vm: MainViewModel) {
             onCodeChange = vm::updateCode,
             onPair = vm::pair,
             onAutoPair = vm::autoConnect,
+            onOneTapConnect = vm::oneTapConnect,
         )
     } else {
         DashboardScreen(vm)
@@ -52,6 +48,7 @@ fun PairingScreen(
     onCodeChange: (String) -> Unit,
     onPair: () -> Unit,
     onAutoPair: () -> Unit,
+    onOneTapConnect: () -> Unit,
 ) {
     Column(
         modifier = Modifier
@@ -60,10 +57,12 @@ fun PairingScreen(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         Text("Onboarding + Pairing", style = MaterialTheme.typography.headlineSmall)
+        Button(onClick = onOneTapConnect, modifier = Modifier.fillMaxWidth()) { Text("Підключитися (1 кнопка)") }
+        Text("або ручний режим", style = MaterialTheme.typography.bodySmall)
         OutlinedTextField(value = host, onValueChange = onHostChange, label = { Text("Server IP:port") }, modifier = Modifier.fillMaxWidth())
         OutlinedTextField(value = code, onValueChange = onCodeChange, label = { Text("Pairing code") }, modifier = Modifier.fillMaxWidth())
         Button(onClick = onPair, modifier = Modifier.fillMaxWidth()) { Text("Pair") }
-        Button(onClick = onAutoPair, modifier = Modifier.fillMaxWidth()) { Text("Автопідключення") }
+        Button(onClick = onAutoPair, modifier = Modifier.fillMaxWidth()) { Text("Автопідключення (по host)") }
         if (status.isNotBlank()) Text(status)
     }
 }
